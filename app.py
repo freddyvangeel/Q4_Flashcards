@@ -2,7 +2,7 @@ import html
 import random
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import requests
 import streamlit as st
@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/2.0)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/2.1)'
 ALL_LAWS_LABEL = 'Alle wetten'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
@@ -196,6 +196,12 @@ def pick_new_card(cards, current_reference=None):
     return random.choice(filtered or cards)
 
 
+def set_current_card(card):
+    st.session_state.current_card = card
+    st.session_state.show_back = False
+    st.session_state.back_text = get_text(card['url'], card['article'], card['lid'])
+
+
 def main():
     st.set_page_config(page_title='Q4 flashcards', page_icon='⚖️', layout='centered')
     st.title('Q4 flashcards')
@@ -207,6 +213,7 @@ def main():
         'Filter op wet',
         options=law_options,
         default=[ALL_LAWS_LABEL],
+        key='law_filter',
     )
 
     filtered_cards = filter_cards_by_laws(cards, selected_laws)
@@ -219,15 +226,13 @@ def main():
     current_card = st.session_state.get('current_card')
     valid_refs = {card['reference'] for card in filtered_cards}
     if not current_card or current_card['reference'] not in valid_refs:
-        st.session_state.current_card = pick_new_card(filtered_cards)
-        st.session_state.show_back = False
+        set_current_card(pick_new_card(filtered_cards))
 
     col1, col2 = st.columns(2)
     with col1:
         if st.button('Nieuwe kaart', use_container_width=True):
             current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
-            st.session_state.current_card = pick_new_card(filtered_cards, current_ref)
-            st.session_state.show_back = False
+            set_current_card(pick_new_card(filtered_cards, current_ref))
             st.rerun()
     with col2:
         if st.button('Draai kaart', use_container_width=True):
@@ -236,12 +241,10 @@ def main():
 
     card = st.session_state.current_card
     st.subheader(card['label'])
+    st.write(card['front'])
 
-    if st.session_state.show_back:
-        back_text = get_text(card['url'], card['article'], card['lid'])
-        st.text_area('Wettekst', back_text, height=420)
-    else:
-        st.write(card['front'])
+    with st.expander('Achterkant', expanded=st.session_state.show_back):
+        st.text_area('Wettekst', st.session_state.get('back_text', ''), height=420)
 
     with st.expander('Overgeslagen regels'):
         for item, reason in skipped:
