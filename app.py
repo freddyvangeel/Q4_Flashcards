@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.6)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.7)'
 ALL_LAWS_LABEL = 'Alle wetten'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
@@ -123,61 +123,37 @@ def _build_clean_text_url(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, clean_query, parsed.fragment))
 
 
-def _looks_like_article_start(text: str, article: str) -> bool:
-    escaped = re.escape(str(article).strip())
-    patterns = [
-        rf'^artikel\s+{escaped}(?:\b|[\s.:])',
-        rf'^art\.\s*{escaped}(?:\b|[\s.:])',
-    ]
-    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+def _extract_article_block(page_text: str, article: str) -> str | None:
+    article_value = re.escape(str(article).strip())
+    start_pattern = re.compile(rf'(?im)^artikel\s+{article_value}(?:[\s.:]|$)')
+    starts = list(start_pattern.finditer(page_text))
+    if not starts:
+        return None
+
+    start = starts[0].start()
+    end_pattern = re.compile(r'(?im)^artikel\s+[0-9a-zA-Z:.]+(?:[\s.:]|$)')
+    end = len(page_text)
+    for match in end_pattern.finditer(page_text, starts[0].end()):
+        end = match.start()
+        break
+
+    block = page_text[start:end].strip()
+    return _remove_noise_lines(block)
 
 
-def _extract_article_text_from_page(page_text: str, article: str) -> str | None:
-    escaped = re.escape(str(article).strip())
-    patterns = [
-        re.compile(
-            rf'(artikel\s+{escaped}(?:\b|[\s.:]).*?)(?=\nartikel\s+[0-9a-zA-Z:.]+(?:\b|[\s.:])|$)',
-            re.IGNORECASE | re.DOTALL,
-        ),
-        re.compile(
-            rf'(Artikel\s+{escaped}(?:\b|[\s.:]).*?)(?=\nArtikel\s+[0-9a-zA-Z:.]+(?:\b|[\s.:])|$)',
-            re.DOTALL,
-        ),
-    ]
-    for pattern in patterns:
-        match = pattern.search(page_text)
-        if match:
-            return _remove_noise_lines(match.group(1))
-    return None
-
-
-def _find_lid_text(article_text: str, lid: str) -> str | None:
-    lid_value = str(lid).strip()
-    escaped = re.escape(lid_value)
+def _extract_lid_from_article(article_text: str, lid: str) -> str | None:
+    lid_value = re.escape(str(lid).strip())
     text = article_text.replace('\r\n', '\n')
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
 
-    numbered_lines = [line for line in lines if re.match(r'^\d+[.:)]?\s+', line)]
-    if numbered_lines:
-        collecting = False
-        collected = []
-        for line in numbered_lines:
-            if re.match(rf'^{escaped}[.:)]?\s+', line):
-                collecting = True
-                collected = [line]
-                continue
-            if collecting and re.match(r'^\d+[.:)]?\s+', line):
-                break
-            if collecting:
-                collected.append(line)
-        if collected:
-            return _remove_noise_lines('\n'.join(collected))
-
-    block_pattern = re.compile(
-        rf'(^|\n){escaped}[.:)]?\s+.*?(?=(\n\d+[.:)]?\s+|$))',
-        re.IGNORECASE | re.DOTALL,
+    multiline_pattern = re.compile(
+        rf'(?ms)^\s*{lid_value}[.:)]?\s+.*?(?=^\s*\d+[.:)]?\s+|\Z)'
     )
-    match = block_pattern.search(text)
+    match = multiline_pattern.search(text)
+    if match:
+        return _remove_noise_lines(match.group(0))
+
+    singleline_pattern = re.compile(rf'(?m)^\s*{lid_value}[.:)]?\s+.+$')
+    match = singleline_pattern.search(text)
     if match:
         return _remove_noise_lines(match.group(0))
 
@@ -203,15 +179,15 @@ def extract_exact_text_from_wetten(url: str, article_hint: str | None = None, li
     if not article:
         return page_text
 
-    article_text = _extract_article_text_from_page(page_text, article)
+    article_text = _extract_article_block(page_text, article)
     if not article_text:
         return 'Artikel of lid niet exact gevonden op de bronpagina.'
 
     if lid:
-        lid_text = _find_lid_text(article_text, lid)
+        lid_text = _extract_lid_from_article(article_text, lid)
         if lid_text:
             return lid_text
-        return f'Lid {lid} niet exact gevonden binnen artikel {article}.\n\n{article_text}'
+        return article_text
 
     return article_text
 
