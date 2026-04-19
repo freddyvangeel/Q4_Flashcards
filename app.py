@@ -13,7 +13,7 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.6)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.7)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -82,14 +82,15 @@ def tekst_url(url):
     p=urlparse(url); q=parse_qs(p.query); q['tekst']=['1']
     return urlunparse((p.scheme,p.netloc,p.path,p.params,urlencode(q,doseq=True),p.fragment))
 
-# 🔴 STRIKT: alleen losse artikelkop
+# ✅ FIX: flexibel starten (ook met extra tekst), strikt stoppen
+
+def is_article_start(line, article):
+    line = line.strip().lower()
+    return line.startswith(f"artikel {article.lower()}") and len(line) < 80
+
 
 def is_article_heading(line):
     return bool(re.match(r'^Artikel\s+\d+[a-zA-Z]*\s*$', line.strip()))
-
-
-def is_article_start(line,article):
-    return bool(re.match(rf'^Artikel\s+{re.escape(article)}\s*$', line.strip(), re.I))
 
 
 def is_lid_start(line,lid=None):
