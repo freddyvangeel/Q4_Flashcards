@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/2.1)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/2.2)'
 ALL_LAWS_LABEL = 'Alle wetten'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
@@ -198,7 +198,6 @@ def pick_new_card(cards, current_reference=None):
 
 def set_current_card(card):
     st.session_state.current_card = card
-    st.session_state.show_back = False
     st.session_state.back_text = get_text(card['url'], card['article'], card['lid'])
 
 
@@ -228,27 +227,17 @@ def main():
     if not current_card or current_card['reference'] not in valid_refs:
         set_current_card(pick_new_card(filtered_cards))
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button('Nieuwe kaart', use_container_width=True):
-            current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
-            set_current_card(pick_new_card(filtered_cards, current_ref))
-            st.rerun()
-    with col2:
-        if st.button('Draai kaart', use_container_width=True):
-            st.session_state.show_back = not st.session_state.show_back
-            st.rerun()
+    if st.button('Nieuwe kaart', use_container_width=True):
+        current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
+        set_current_card(pick_new_card(filtered_cards, current_ref))
+        st.rerun()
 
     card = st.session_state.current_card
     st.subheader(card['label'])
     st.write(card['front'])
 
-    with st.expander('Achterkant', expanded=st.session_state.show_back):
+    with st.expander('Achterkant', expanded=False):
         st.text_area('Wettekst', st.session_state.get('back_text', ''), height=420)
-
-    with st.expander('Overgeslagen regels'):
-        for item, reason in skipped:
-            st.write(f'- {item} ({reason})')
 
 
 if __name__ == '__main__':
