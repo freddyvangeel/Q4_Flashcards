@@ -13,7 +13,7 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/5.1)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/5.2)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -119,8 +119,6 @@ def load_cards():
 
 def find_article_container(soup: BeautifulSoup, article: str):
     article = article.strip().lower()
-
-    # 1. Find explicit heading text like "Artikel 96b" or "Artikel 3. (...)"
     heading_pattern = re.compile(rf'^artikel\s+{re.escape(article)}(?:\b|\s|\.|\(|\[)', re.IGNORECASE)
     heading_tags = ['h1', 'h2', 'h3', 'h4', 'strong', 'b', 'div', 'span', 'a']
 
@@ -128,7 +126,6 @@ def find_article_container(soup: BeautifulSoup, article: str):
         for node in soup.find_all(tag):
             text = normalize_text(node.get_text(' ', strip=True))
             if heading_pattern.match(text):
-                # prefer the nearest block-level wrapper that likely contains the article content
                 for parent in [node] + list(node.parents):
                     name = getattr(parent, 'name', '')
                     if name in {'article', 'section', 'div', 'li'}:
@@ -137,7 +134,6 @@ def find_article_container(soup: BeautifulSoup, article: str):
                             return parent
                 return node
 
-    # 2. Find any element id that references the article
     id_pattern = re.compile(rf'(artikel|art)[\-:_ ]?{re.escape(article)}\b', re.IGNORECASE)
     for node in soup.find_all(attrs={'id': True}):
         if id_pattern.search(str(node.get('id', ''))):
@@ -151,21 +147,27 @@ def extract_article_from_container(container, article: str) -> str | None:
     if not text:
         return None
 
+    article_key = article.strip().lower()
     start_pattern = re.compile(rf'(?im)^artikel\s+{re.escape(article)}(?:\b[^\n]*)?$')
     start_match = start_pattern.search(text)
     if not start_match:
-        # fallback: return full container if it clearly starts with the article heading
         first_line = text.split('\n', 1)[0].strip()
         if re.match(rf'^artikel\s+{re.escape(article)}(?:\b|\s|\.|\(|\[)', first_line, re.IGNORECASE):
-            return text
+            return text if len(text) >= 200 else None
         return None
 
-    next_article_pattern = re.compile(r'(?im)^artikel\s+\d+[a-zA-Z]*(?:\b[^\n]*)?$')
+    next_article_pattern = re.compile(r'(?im)^artikel\s+(\d+[a-zA-Z]*)(?:\b[^\n]*)?$')
     end = len(text)
     for match in next_article_pattern.finditer(text, start_match.end()):
-        end = match.start()
-        break
-    return text[start_match.start():end].strip()
+        if match.group(1).strip().lower() != article_key:
+            end = match.start()
+            break
+
+    block = text[start_match.start():end].strip()
+    block = clean_extracted_text(block)
+    if len(block) < 200:
+        return None
+    return block
 
 
 def extract_lid_block(article_text: str, lid: str) -> str | None:
