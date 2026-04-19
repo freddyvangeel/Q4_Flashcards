@@ -13,7 +13,7 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/5.0)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/5.1)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -34,22 +34,14 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
-def normalize_line(text: str) -> str:
-    text = html.unescape(text or '').replace('\xa0', ' ')
-    text = re.sub(r'[ \t]+', ' ', text)
-    return text.strip()
-
-
-def page_text_from_html(raw_html: str) -> str:
-    soup = BeautifulSoup(raw_html, 'html.parser')
-    main = soup.select_one('#content') or soup.select_one('main') or soup.body or soup
+def clean_extracted_text(text: str) -> str:
     lines = []
-    for value in main.stripped_strings:
-        value = normalize_line(value)
-        if not value or value in NOISE:
+    for raw in text.split('\n'):
+        line = normalize_text(raw)
+        if not line or line in NOISE:
             continue
-        lines.append(value)
-    return normalize_text('\n'.join(lines))
+        lines.append(line)
+    return '\n'.join(lines).strip()
 
 
 def tekst_url(url: str) -> str:
@@ -125,23 +117,55 @@ def load_cards():
     return list(by_reference.values()), payload.get('errors', [])
 
 
-def extract_article_block(text: str, article: str) -> str | None:
-    article_escaped = re.escape(article.strip())
-    start_pattern = re.compile(
-        rf'(?m)^Artikel\s+{article_escaped}(?:\b[^\n]*)?$',
-    )
-    start_match = start_pattern.search(text)
-    if not start_match:
+def find_article_container(soup: BeautifulSoup, article: str):
+    article = article.strip().lower()
+
+    # 1. Find explicit heading text like "Artikel 96b" or "Artikel 3. (...)"
+    heading_pattern = re.compile(rf'^artikel\s+{re.escape(article)}(?:\b|\s|\.|\(|\[)', re.IGNORECASE)
+    heading_tags = ['h1', 'h2', 'h3', 'h4', 'strong', 'b', 'div', 'span', 'a']
+
+    for tag in heading_tags:
+        for node in soup.find_all(tag):
+            text = normalize_text(node.get_text(' ', strip=True))
+            if heading_pattern.match(text):
+                # prefer the nearest block-level wrapper that likely contains the article content
+                for parent in [node] + list(node.parents):
+                    name = getattr(parent, 'name', '')
+                    if name in {'article', 'section', 'div', 'li'}:
+                        parent_text = clean_extracted_text(parent.get_text('\n', strip=True))
+                        if heading_pattern.search(parent_text.lower()):
+                            return parent
+                return node
+
+    # 2. Find any element id that references the article
+    id_pattern = re.compile(rf'(artikel|art)[\-:_ ]?{re.escape(article)}\b', re.IGNORECASE)
+    for node in soup.find_all(attrs={'id': True}):
+        if id_pattern.search(str(node.get('id', ''))):
+            return node
+
+    return None
+
+
+def extract_article_from_container(container, article: str) -> str | None:
+    text = clean_extracted_text(container.get_text('\n', strip=True))
+    if not text:
         return None
 
-    next_article_pattern = re.compile(r'(?m)^Artikel\s+\d+[a-zA-Z]*(?:\b[^\n]*)?$')
+    start_pattern = re.compile(rf'(?im)^artikel\s+{re.escape(article)}(?:\b[^\n]*)?$')
+    start_match = start_pattern.search(text)
+    if not start_match:
+        # fallback: return full container if it clearly starts with the article heading
+        first_line = text.split('\n', 1)[0].strip()
+        if re.match(rf'^artikel\s+{re.escape(article)}(?:\b|\s|\.|\(|\[)', first_line, re.IGNORECASE):
+            return text
+        return None
+
+    next_article_pattern = re.compile(r'(?im)^artikel\s+\d+[a-zA-Z]*(?:\b[^\n]*)?$')
     end = len(text)
     for match in next_article_pattern.finditer(text, start_match.end()):
         end = match.start()
         break
-
-    block = text[start_match.start():end].strip()
-    return normalize_text(block) if block else None
+    return text[start_match.start():end].strip()
 
 
 def extract_lid_block(article_text: str, lid: str) -> str | None:
@@ -152,28 +176,26 @@ def extract_lid_block(article_text: str, lid: str) -> str | None:
         return None
 
     next_lid_pattern = re.compile(r'(?m)^\s*\d+[.:)]?\s+')
-    next_article_pattern = re.compile(r'(?m)^Artikel\s+\d+[a-zA-Z]*(?:\b[^\n]*)?$')
-
     end = len(article_text)
-    lid_end = next_lid_pattern.search(article_text, start_match.end())
-    art_end = next_article_pattern.search(article_text, start_match.end())
-
-    if lid_end:
-        end = min(end, lid_end.start())
-    if art_end:
-        end = min(end, art_end.start())
-
-    block = article_text[start_match.start():end].strip()
-    return normalize_text(block) if block else None
+    next_match = next_lid_pattern.search(article_text, start_match.end())
+    if next_match:
+        end = next_match.start()
+    return article_text[start_match.start():end].strip()
 
 
 def extract_from_url(url: str, article: str, lid: str | None) -> str | None:
     response = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
-    text = page_text_from_html(response.text)
-    article_text = extract_article_block(text, article)
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    container = find_article_container(soup, article)
+    if container is None:
+        return None
+
+    article_text = extract_article_from_container(container, article)
     if not article_text:
         return None
+
     if lid:
         lid_text = extract_lid_block(article_text, lid)
         if lid_text:
@@ -183,14 +205,14 @@ def extract_from_url(url: str, article: str, lid: str | None) -> str | None:
 
 def extract(url: str, article: str, lid: str | None) -> str:
     try:
-        result = extract_from_url(tekst_url(url), article, lid)
+        result = extract_from_url(url, article, lid)
         if result:
             return result
     except Exception:
         pass
 
     try:
-        result = extract_from_url(url, article, lid)
+        result = extract_from_url(tekst_url(url), article, lid)
         if result:
             return result
     except Exception:
