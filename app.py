@@ -10,10 +10,22 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.2)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.3)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
+NOISE_PHRASES = [
+    'Toon relaties in LiDO',
+    'Maak een permanente link',
+    'Toon wetstechnische informatie',
+    'Gegevens van deze regeling',
+    'Vergelijk met andere versies',
+    'Bekijk wijzigingsinformatie',
+    'Zoek binnen deze regeling',
+    'Selecteer een andere versie',
+    'Druk het regelingonderdeel af',
+    'Sla het regelingonderdeel op',
+]
 
 
 def parse_line(line: str):
@@ -88,6 +100,20 @@ def _normalize_text(text: str) -> str:
     return text.strip()
 
 
+def _remove_noise_lines(text: str) -> str:
+    cleaned_lines = []
+    for raw_line in text.split('\n'):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line in NOISE_PHRASES:
+            continue
+        if line == '...':
+            continue
+        cleaned_lines.append(line)
+    return _normalize_text('\n'.join(cleaned_lines))
+
+
 def _find_best_article_container(soup: BeautifulSoup, article: str):
     article_text = str(article).strip()
     escaped = re.escape(article_text)
@@ -108,12 +134,12 @@ def _find_best_article_container(soup: BeautifulSoup, article: str):
     candidate_tags = ['article', 'div', 'section']
     for tag in candidate_tags:
         for element in soup.find_all(tag):
-            text = _normalize_text(element.get_text('\n', strip=True))
+            text = _remove_noise_lines(_normalize_text(element.get_text('\n', strip=True)))
             if any(re.search(pattern, text, re.IGNORECASE) for pattern in text_patterns):
                 return element
 
     for element in soup.find_all(['article', 'div', 'section', 'li']):
-        text = _normalize_text(element.get_text('\n', strip=True))
+        text = _remove_noise_lines(_normalize_text(element.get_text('\n', strip=True)))
         if any(re.search(pattern, text, re.IGNORECASE) for pattern in text_patterns):
             return element
 
@@ -144,7 +170,7 @@ def _find_lid_text(article_text: str, lid: str) -> str | None:
             if collecting:
                 collected.append(line)
         if collected:
-            return _normalize_text('\n'.join(collected))
+            return _remove_noise_lines('\n'.join(collected))
 
     block_pattern = re.compile(
         rf'(^|\n){escaped}[.:)]?\s+.*?(?=(\n\d+[.:)]?\s+|$))',
@@ -152,7 +178,7 @@ def _find_lid_text(article_text: str, lid: str) -> str | None:
     )
     match = block_pattern.search(text)
     if match:
-        return _normalize_text(match.group(0))
+        return _remove_noise_lines(match.group(0))
 
     return None
 
@@ -171,12 +197,12 @@ def extract_exact_text_from_wetten(url: str, article_hint: str | None = None, li
 
     soup = BeautifulSoup(response.text, 'html.parser')
     container = _find_best_article_container(soup, article) if article else None
-    page_text = _normalize_text(soup.get_text('\n', strip=True))
+    page_text = _remove_noise_lines(_normalize_text(soup.get_text('\n', strip=True)))
 
     if not container:
         return page_text
 
-    article_text = _normalize_text(container.get_text('\n', strip=True))
+    article_text = _remove_noise_lines(_normalize_text(container.get_text('\n', strip=True)))
     if lid:
         lid_text = _find_lid_text(article_text, lid)
         if lid_text:
