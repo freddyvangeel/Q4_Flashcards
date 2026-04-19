@@ -13,7 +13,7 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.1)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.2)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -81,21 +81,29 @@ def load_source_cards():
     return cards
 
 
+def read_cache_payload():
+    if not CACHE_FILE.exists():
+        return {'cards': [], 'errors': []}
+    try:
+        return json.loads(CACHE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {'cards': [], 'errors': []}
+
+
+def write_cache_payload(payload):
+    CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 def load_cards():
     source_cards = load_source_cards()
     by_reference = {card['reference']: dict(card) for card in source_cards}
-    errors = []
+    payload = read_cache_payload()
+    errors = payload.get('errors', [])
 
-    if CACHE_FILE.exists():
-        try:
-            payload = json.loads(CACHE_FILE.read_text(encoding='utf-8'))
-            for cached in payload.get('cards', []):
-                ref = cached.get('reference')
-                if ref in by_reference and cached.get('back'):
-                    by_reference[ref]['back'] = cached.get('back', '')
-            errors = payload.get('errors', [])
-        except Exception:
-            errors = []
+    for cached in payload.get('cards', []):
+        ref = cached.get('reference')
+        if ref in by_reference and cached.get('back'):
+            by_reference[ref]['back'] = cached.get('back', '')
 
     return list(by_reference.values()), errors
 
@@ -223,9 +231,36 @@ def fetch_live_text(url, article, lid):
     return 'Artikel niet gevonden op de bronpagina.'
 
 
-@st.cache_data(show_spinner=False)
-def get_fallback_text(url, article, lid):
-    return fetch_live_text(url, article, lid)
+def persist_card_back(card, back_text):
+    payload = read_cache_payload()
+    cards = payload.get('cards', [])
+    updated = False
+
+    for item in cards:
+        if item.get('reference') == card['reference']:
+            item['back'] = back_text
+            updated = True
+            break
+
+    if not updated:
+        cached_card = dict(card)
+        cached_card['back'] = back_text
+        cards.append(cached_card)
+
+    payload['cards'] = cards
+    payload.setdefault('errors', [])
+    write_cache_payload(payload)
+    load_source_cards.clear()
+
+
+def get_back_text(card):
+    if card.get('back'):
+        return card['back']
+
+    back_text = fetch_live_text(card['url'], card['article'], card['lid'])
+    persist_card_back(card, back_text)
+    card['back'] = back_text
+    return back_text
 
 
 def get_law_options(cards):
@@ -250,7 +285,7 @@ def pick_new_card(cards, current_reference=None):
 
 def set_current_card(card):
     st.session_state.current_card = card
-    st.session_state.back_text = card.get('back') or get_fallback_text(card['url'], card['article'], card['lid'])
+    st.session_state.back_text = get_back_text(card)
 
 
 def main():
