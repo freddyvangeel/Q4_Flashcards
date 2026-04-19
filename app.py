@@ -13,7 +13,7 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.4)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.5)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -30,34 +30,26 @@ def parse_line(line: str):
     line = line.strip()
     if not line.startswith('* '):
         return None
-
     body = line[2:].strip()
     if '→' not in body:
         return {'skip': True}
-
     ref, rest = body.split('→', 1)
     ref = ref.strip()
-
     match = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', rest)
     if not match:
         return {'skip': True}
-
     desc = match.group(1).strip()
     url = match.group(2).strip()
-
     article_match = ARTICLE_RE.search(ref)
     if not article_match:
         return {'skip': True}
-
     article = article_match.group(1).strip()
     lid_match = LID_RE.search(ref)
     lid = lid_match.group(1).strip() if lid_match else None
     law = ref.split(' Artikel:')[0].strip()
-
     label = f"{law}, artikel {article}"
     if lid:
         label += f", lid {lid}"
-
     return {
         'skip': False,
         'law': law,
@@ -99,12 +91,10 @@ def load_cards():
     by_reference = {card['reference']: dict(card) for card in source_cards}
     payload = read_cache_payload()
     errors = payload.get('errors', [])
-
     for cached in payload.get('cards', []):
         ref = cached.get('reference')
         if ref in by_reference and cached.get('back'):
             by_reference[ref]['back'] = cached.get('back', '')
-
     return list(by_reference.values()), errors
 
 
@@ -135,10 +125,18 @@ def build_tekst_url(url: str) -> str:
 
 
 def is_article_heading(line: str) -> bool:
-    return bool(re.match(r'^Artikel\s+[0-9A-Za-z:.]+(?:\b|[\s.:-])', line, re.IGNORECASE))
+    line = line.strip()
+    return bool(re.match(r'^Artikel\s+[0-9A-Za-z:.]+\s*$', line, re.IGNORECASE))
+
+
+def is_article_start(line: str, article: str) -> bool:
+    line = line.strip()
+    escaped = re.escape(article)
+    return bool(re.match(rf'^Artikel\s+{escaped}(?:\s*$|\s*[\[(])', line, re.IGNORECASE))
 
 
 def is_lid_start(line: str, lid: str | None = None) -> bool:
+    line = line.strip()
     if lid is not None:
         return bool(re.match(rf'^{re.escape(lid)}[.:)]\s+', line))
     return bool(re.match(r'^\d+[.:)]\s+', line))
@@ -147,7 +145,7 @@ def is_lid_start(line: str, lid: str | None = None) -> bool:
 def extract_article(page_lines, article):
     start = None
     for index, line in enumerate(page_lines):
-        if re.match(rf'^Artikel\s+{re.escape(article)}(?:\b|[\s.:-])', line, re.IGNORECASE):
+        if is_article_start(line, article):
             start = index
             break
     if start is None:
@@ -155,7 +153,6 @@ def extract_article(page_lines, article):
 
     block = [page_lines[start]]
     content_found = False
-
     for line in page_lines[start + 1:]:
         if is_article_heading(line):
             break
@@ -172,7 +169,6 @@ def extract_article(page_lines, article):
 def extract_lid(article_text, lid):
     lines = [line.strip() for line in article_text.split('\n') if line.strip()]
     start = None
-
     for index, line in enumerate(lines):
         if is_lid_start(line, lid):
             start = index
@@ -187,7 +183,6 @@ def extract_lid(article_text, lid):
         if is_article_heading(line):
             break
         block.append(line)
-
     return '\n'.join(block).strip()
 
 
@@ -230,14 +225,12 @@ def fetch_live_text(url, article, lid):
             return result
     except Exception:
         pass
-
     try:
         result = extract_from_html_variant(url, article, lid)
         if result:
             return result
     except Exception:
         pass
-
     return 'Artikel niet gevonden op de bronpagina.'
 
 
@@ -245,18 +238,15 @@ def persist_card_back(card, back_text):
     payload = read_cache_payload()
     cards = payload.get('cards', [])
     updated = False
-
     for item in cards:
         if item.get('reference') == card['reference']:
             item['back'] = back_text
             updated = True
             break
-
     if not updated:
         cached_card = dict(card)
         cached_card['back'] = back_text
         cards.append(cached_card)
-
     payload['cards'] = cards
     payload.setdefault('errors', [])
     write_cache_payload(payload)
@@ -265,7 +255,6 @@ def persist_card_back(card, back_text):
 def get_back_text(card):
     if card.get('back'):
         return card['back']
-
     back_text = fetch_live_text(card['url'], card['article'], card['lid'])
     persist_card_back(card, back_text)
     card['back'] = back_text
@@ -313,13 +302,7 @@ def main():
 
     cards, errors = load_cards()
     law_options = get_law_options(cards)
-    selected_laws = st.multiselect(
-        'Filter op wet',
-        options=law_options,
-        default=[ALL_LAWS_LABEL],
-        key='law_filter',
-    )
-
+    selected_laws = st.multiselect('Filter op wet', options=law_options, default=[ALL_LAWS_LABEL], key='law_filter')
     filtered_cards = filter_cards_by_laws(cards, selected_laws)
     cached_count = sum(1 for card in cards if card.get('back'))
     st.caption(f'{len(filtered_cards)} kaartjes beschikbaar. Cache gevuld: {cached_count}/{len(cards)}.')
