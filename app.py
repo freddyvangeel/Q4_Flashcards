@@ -13,7 +13,7 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.2)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.3)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -250,7 +250,6 @@ def persist_card_back(card, back_text):
     payload['cards'] = cards
     payload.setdefault('errors', [])
     write_cache_payload(payload)
-    load_source_cards.clear()
 
 
 def get_back_text(card):
@@ -261,6 +260,16 @@ def get_back_text(card):
     persist_card_back(card, back_text)
     card['back'] = back_text
     return back_text
+
+
+def reload_current_card_back():
+    card = st.session_state.get('current_card')
+    if not card:
+        return
+    back_text = fetch_live_text(card['url'], card['article'], card['lid'])
+    persist_card_back(card, back_text)
+    st.session_state.current_card['back'] = back_text
+    st.session_state.back_text = back_text
 
 
 def get_law_options(cards):
@@ -314,10 +323,16 @@ def main():
     if not current_card or current_card['reference'] not in valid_refs:
         set_current_card(pick_new_card(filtered_cards))
 
-    if st.button('Nieuwe kaart', use_container_width=True):
-        current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
-        set_current_card(pick_new_card(filtered_cards, current_ref))
-        st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button('Nieuwe kaart', use_container_width=True):
+            current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
+            set_current_card(pick_new_card(filtered_cards, current_ref))
+            st.rerun()
+    with col2:
+        if st.button('Herlaad wet', use_container_width=True):
+            reload_current_card_back()
+            st.rerun()
 
     card = st.session_state.current_card
     st.subheader(card['label'])
