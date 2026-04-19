@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.1)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.2)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -79,49 +79,116 @@ def load_cards():
     return cards, skipped
 
 
-def _select_article_block(soup: BeautifulSoup, article: str):
-    escaped = re.escape(article)
+def _normalize_text(text: str) -> str:
+    text = html.unescape(text or '')
+    text = text.replace('\xa0', ' ')
+    text = re.sub(r'\r', '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    return text.strip()
+
+
+def _find_best_article_container(soup: BeautifulSoup, article: str):
+    article_text = str(article).strip()
+    escaped = re.escape(article_text)
+
+    id_patterns = [
+        rf'artikel[.\-:_]?{escaped}(?:\b|$)',
+        rf'art[.\-:_]?{escaped}(?:\b|$)',
+    ]
     for element in soup.find_all(id=True):
-        if re.search(rf'artikel[.\-:_]?{escaped}\b', element['id'], re.IGNORECASE):
+        element_id = element.get('id', '')
+        if any(re.search(pattern, element_id, re.IGNORECASE) for pattern in id_patterns):
             return element
-    return soup.select_one('div.artikel, article, div[class*="artikel"]') or soup.body
 
+    text_patterns = [
+        rf'^artikel\s+{escaped}[\s.:]',
+        rf'^artikel\s+{escaped}$',
+    ]
+    candidate_tags = ['article', 'div', 'section']
+    for tag in candidate_tags:
+        for element in soup.find_all(tag):
+            text = _normalize_text(element.get_text('\n', strip=True))
+            if any(re.search(pattern, text, re.IGNORECASE) for pattern in text_patterns):
+                return element
 
-def _select_lid_block(block, lid: str):
-    escaped = re.escape(lid)
-    for element in block.find_all(id=True):
-        if re.search(rf'lid[.\-:_]?{escaped}\b', element['id'], re.IGNORECASE):
+    for element in soup.find_all(['article', 'div', 'section', 'li']):
+        text = _normalize_text(element.get_text('\n', strip=True))
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in text_patterns):
             return element
-    return block
+
+    return None
 
 
-def extract_exact_text_from_wetten(url: str) -> str:
+def _find_lid_text(article_text: str, lid: str) -> str | None:
+    lid_value = str(lid).strip()
+    escaped = re.escape(lid_value)
+    text = article_text.replace('\r\n', '\n')
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+
+    numbered_lines = []
+    for line in lines:
+        if re.match(r'^\d+[.:)]?\s+', line):
+            numbered_lines.append(line)
+
+    if numbered_lines:
+        collecting = False
+        collected = []
+        for line in numbered_lines:
+            if re.match(rf'^{escaped}[.:)]?\s+', line):
+                collecting = True
+                collected = [line]
+                continue
+            if collecting and re.match(r'^\d+[.:)]?\s+', line):
+                break
+            if collecting:
+                collected.append(line)
+        if collected:
+            return _normalize_text('\n'.join(collected))
+
+    block_pattern = re.compile(
+        rf'(^|\n){escaped}[.:)]?\s+.*?(?=(\n\d+[.:)]?\s+|$))',
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = block_pattern.search(text)
+    if match:
+        return _normalize_text(match.group(0))
+
+    return None
+
+
+def extract_exact_text_from_wetten(url: str, article_hint: str | None = None, lid_hint: str | None = None) -> str:
     parsed = urlparse(url)
     if 'wetten.overheid.nl' not in parsed.netloc:
         return 'Geen ondersteunde bron voor exacte wettekst.'
 
     params = parse_qs(parsed.query)
-    article = params.get('artikel', [None])[0]
-    lid = params.get('lid', [None])[0]
+    article = params.get('artikel', [None])[0] or article_hint
+    lid = params.get('lid', [None])[0] or lid_hint
 
     response = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, 'html.parser')
-    block = _select_article_block(soup, article) if article else soup.body
-    if lid and block:
-        block = _select_lid_block(block, lid)
+    container = _find_best_article_container(soup, article) if article else None
+    page_text = _normalize_text(soup.get_text('\n', strip=True))
 
-    text = block.get_text('\n', strip=True) if block else soup.get_text('\n', strip=True)
-    text = html.unescape(text)
-    text = re.sub(r'\n{2,}', '\n\n', text).strip()
-    return text or 'Geen tekst gevonden.'
+    if not container:
+        return page_text
+
+    article_text = _normalize_text(container.get_text('\n', strip=True))
+    if lid:
+        lid_text = _find_lid_text(article_text, lid)
+        if lid_text:
+            return lid_text
+
+    return article_text or page_text
 
 
 @st.cache_data(show_spinner=True)
-def get_back_text(url: str) -> str:
+def get_back_text(url: str, article: str | None, lid: str | None) -> str:
     try:
-        return extract_exact_text_from_wetten(url)
+        return extract_exact_text_from_wetten(url, article, lid)
     except Exception as exc:
         return f'Fout bij ophalen van de wettekst: {exc}'
 
@@ -166,11 +233,11 @@ def main():
     st.subheader(card['label'])
     st.markdown(f'**Voorkant:** {card["front"]}')
     st.markdown(f'**Bronregel:** {card["reference"]}')
-    st.markdown(f'**URL:** {card["url"]}')
 
     if st.session_state.show_back:
         st.markdown('### Achterkant')
-        st.text_area('Exacte wettekst', get_back_text(card['url']), height=420)
+        back_text = get_back_text(card['url'], card['article'], card['lid'])
+        st.text_area('Exacte wettekst', back_text, height=420)
     else:
         st.info('Klik op **Draai kaart** voor de exacte wettekst.')
 
