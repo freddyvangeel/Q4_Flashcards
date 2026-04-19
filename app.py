@@ -13,23 +13,33 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/5.3)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/5.4)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
-LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
 
-NOISE = {
-    'Toon relaties in LiDO','Maak een permanente link','Toon wetstechnische informatie',
-    'Gegevens van deze regeling','Vergelijk met andere versies','Bekijk wijzigingsinformatie',
-    'Zoek binnen deze regeling','Selecteer een andere versie','Druk het regelingonderdeel af',
-    'Sla het regelingonderdeel op','Permalink','...'
-}
+# 🔴 vaste ruis verwijderen
+NOISE_PHRASES = [
+    "Toon relaties in LiDO",
+    "Maak een permanente link",
+    "Toon wetstechnische informatie",
+    "Gegevens van deze regeling",
+    "Vergelijk met andere versies",
+    "Bekijk wijzigingsinformatie",
+    "Zoek binnen deze regeling",
+    "Selecteer een andere versie",
+    "Druk het regelingonderdeel af",
+    "Sla het regelingonderdeel op",
+]
 
-# 🔴 FIX: geen onnatuurlijke regeleinden meer
 
 def extract_clean_text(container):
     raw = container.get_text(" ")
     text = html.unescape(raw).replace('\xa0',' ')
+
+    # 🔴 verwijder UI-ruis
+    for phrase in NOISE_PHRASES:
+        text = text.replace(phrase, "")
+
     text = re.sub(r'\s+', ' ', text)
 
     # leden structureren
@@ -67,7 +77,6 @@ def extract(url, article, lid):
 
         text = extract_clean_text(container)
 
-        # knip op volgend artikel
         parts = re.split(r'(?=Artikel \d+[a-zA-Z]*)', text)
         for part in parts:
             if part.lower().startswith(f"artikel {article.lower()}"):
