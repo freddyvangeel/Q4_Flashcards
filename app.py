@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/2.3)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/2.2)'
 ALL_LAWS_LABEL = 'Alle wetten'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
@@ -199,7 +199,6 @@ def pick_new_card(cards, current_reference=None):
 def set_current_card(card):
     st.session_state.current_card = card
     st.session_state.back_text = get_text(card['url'], card['article'], card['lid'])
-    st.session_state.expander_key = st.session_state.get('expander_key', 0) + 1
 
 
 def main():
@@ -237,9 +236,8 @@ def main():
     st.subheader(card['label'])
     st.write(card['front'])
 
-    expander_key = f"achterkant_{st.session_state.get('expander_key', 0)}"
     with st.expander('Achterkant', expanded=False):
-        st.text_area('Wettekst', st.session_state.get('back_text', ''), height=420, key=expander_key)
+        st.text_area('Wettekst', st.session_state.get('back_text', ''), height=420)
 
 
 if __name__ == '__main__':
