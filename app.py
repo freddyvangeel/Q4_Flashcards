@@ -13,207 +13,255 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.8)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/5.0)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
 
 NOISE = {
-    'Toon relaties in LiDO','Maak een permanente link','Toon wetstechnische informatie',
-    'Gegevens van deze regeling','Vergelijk met andere versies','Bekijk wijzigingsinformatie',
-    'Zoek binnen deze regeling','Selecteer een andere versie','Druk het regelingonderdeel af',
-    'Sla het regelingonderdeel op','Permalink','...'
+    'Toon relaties in LiDO', 'Maak een permanente link', 'Toon wetstechnische informatie',
+    'Gegevens van deze regeling', 'Vergelijk met andere versies', 'Bekijk wijzigingsinformatie',
+    'Zoek binnen deze regeling', 'Selecteer een andere versie', 'Druk het regelingonderdeel af',
+    'Sla het regelingonderdeel op', 'Permalink', '...'
 }
 
-# 🔴 NIEUW: behoud regeleinden
 
-def norm_text(t):
-    t = html.unescape(t or '').replace('\xa0',' ')
-    t = t.replace('\r','')
-    t = re.sub(r'[ \t]+',' ',t)
-    t = re.sub(r'\n{3,}','\n\n',t)
-    return t.strip()
-
-
-def norm_line(t):
-    t = html.unescape(t or '').replace('\xa0',' ')
-    t = re.sub(r'[ \t]+',' ',t)
-    return t.strip()
+def normalize_text(text: str) -> str:
+    text = html.unescape(text or '').replace('\xa0', ' ')
+    text = text.replace('\r', '')
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
-def tekst_url(url):
-    p=urlparse(url); q=parse_qs(p.query); q['tekst']=['1']
-    return urlunparse((p.scheme,p.netloc,p.path,p.params,urlencode(q,doseq=True),p.fragment))
-
-# flexibel starten, strikt stoppen
-
-def is_article_start(line, article):
-    line = line.strip().lower()
-    return line.startswith(f"artikel {article.lower()}")
+def normalize_line(text: str) -> str:
+    text = html.unescape(text or '').replace('\xa0', ' ')
+    text = re.sub(r'[ \t]+', ' ', text)
+    return text.strip()
 
 
-def is_article_heading(line):
-    return bool(re.match(r'^Artikel\s+\d+[a-zA-Z]*\s*$', line.strip()))
+def page_text_from_html(raw_html: str) -> str:
+    soup = BeautifulSoup(raw_html, 'html.parser')
+    main = soup.select_one('#content') or soup.select_one('main') or soup.body or soup
+    lines = []
+    for value in main.stripped_strings:
+        value = normalize_line(value)
+        if not value or value in NOISE:
+            continue
+        lines.append(value)
+    return normalize_text('\n'.join(lines))
 
 
-def is_lid_start(line,lid=None):
-    if lid: return bool(re.match(rf'^{re.escape(lid)}[.:)]\s+',line.strip()))
-    return bool(re.match(r'^\d+[.:)]\s+',line.strip()))
+def tekst_url(url: str) -> str:
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    params['tekst'] = ['1']
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(params, doseq=True), parsed.fragment))
 
 
-def extract_article(lines,article):
-    start=None
-    for i,l in enumerate(lines):
-        if is_article_start(l,article):
-            start=i; break
-    if start is None: return None
+def parse_line(line: str):
+    line = line.strip()
+    if not line.startswith('* '):
+        return None
+    body = line[2:].strip()
+    if '→' not in body:
+        return {'skip': True}
 
-    block=[lines[start]]
-    for l in lines[start+1:]:
-        if is_article_heading(l): break
-        block.append(l)
-    return '\n'.join(block).strip()
+    ref, rest = body.split('→', 1)
+    ref = ref.strip()
+    match = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', rest)
+    if not match:
+        return {'skip': True}
+
+    desc, url = match.group(1).strip(), match.group(2).strip()
+    article_match = ARTICLE_RE.search(ref)
+    if not article_match:
+        return {'skip': True}
+
+    article = article_match.group(1).strip()
+    lid_match = LID_RE.search(ref)
+    lid = lid_match.group(1).strip() if lid_match else None
+    law = ref.split(' Artikel:')[0].strip()
+    label = f"{law}, artikel {article}" + (f", lid {lid}" if lid else "")
+    return {
+        'skip': False,
+        'law': law,
+        'article': article,
+        'lid': lid,
+        'reference': ref,
+        'front': desc,
+        'url': url,
+        'label': label,
+    }
 
 
-def extract_lid(text,lid):
-    lines=[l.strip() for l in text.split('\n') if l.strip()]
-    start=None
-    for i,l in enumerate(lines):
-        if is_lid_start(l,lid): start=i; break
-    if start is None: return None
-
-    block=[lines[start]]
-    for l in lines[start+1:]:
-        if is_lid_start(l): break
-        if is_article_heading(l): break
-        block.append(l)
-    return '\n'.join(block)
+@st.cache_data(show_spinner=False)
+def load_source_cards():
+    text = SOURCE_FILE.read_text(encoding='utf-8')
+    return [parsed for raw in text.splitlines() if (parsed := parse_line(raw)) and not parsed.get('skip')]
 
 
-def extract(url,article,lid):
+def read_cache_payload():
+    if not CACHE_FILE.exists():
+        return {'cards': [], 'errors': []}
     try:
-        r=requests.get(tekst_url(url),timeout=REQUEST_TIMEOUT)
-        txt=norm_text(r.text)
-        lines=[norm_line(l) for l in txt.split('\n') if norm_line(l)]
-        art=extract_article(lines,article)
-        if art:
-            if lid:
-                lidtxt=extract_lid(art,lid)
-                if lidtxt: return lidtxt
-            return art
-    except:
+        return json.loads(CACHE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {'cards': [], 'errors': []}
+
+
+def write_cache_payload(payload):
+    CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def load_cards():
+    source_cards = load_source_cards()
+    by_reference = {card['reference']: dict(card) for card in source_cards}
+    payload = read_cache_payload()
+    for cached in payload.get('cards', []):
+        ref = cached.get('reference')
+        if ref in by_reference and cached.get('back'):
+            by_reference[ref]['back'] = cached['back']
+    return list(by_reference.values()), payload.get('errors', [])
+
+
+def extract_article_block(text: str, article: str) -> str | None:
+    article_escaped = re.escape(article.strip())
+    start_pattern = re.compile(
+        rf'(?m)^Artikel\s+{article_escaped}(?:\b[^\n]*)?$',
+    )
+    start_match = start_pattern.search(text)
+    if not start_match:
+        return None
+
+    next_article_pattern = re.compile(r'(?m)^Artikel\s+\d+[a-zA-Z]*(?:\b[^\n]*)?$')
+    end = len(text)
+    for match in next_article_pattern.finditer(text, start_match.end()):
+        end = match.start()
+        break
+
+    block = text[start_match.start():end].strip()
+    return normalize_text(block) if block else None
+
+
+def extract_lid_block(article_text: str, lid: str) -> str | None:
+    lid_escaped = re.escape(lid.strip())
+    start_pattern = re.compile(rf'(?m)^\s*{lid_escaped}[.:)]?\s+')
+    start_match = start_pattern.search(article_text)
+    if not start_match:
+        return None
+
+    next_lid_pattern = re.compile(r'(?m)^\s*\d+[.:)]?\s+')
+    next_article_pattern = re.compile(r'(?m)^Artikel\s+\d+[a-zA-Z]*(?:\b[^\n]*)?$')
+
+    end = len(article_text)
+    lid_end = next_lid_pattern.search(article_text, start_match.end())
+    art_end = next_article_pattern.search(article_text, start_match.end())
+
+    if lid_end:
+        end = min(end, lid_end.start())
+    if art_end:
+        end = min(end, art_end.start())
+
+    block = article_text[start_match.start():end].strip()
+    return normalize_text(block) if block else None
+
+
+def extract_from_url(url: str, article: str, lid: str | None) -> str | None:
+    response = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    text = page_text_from_html(response.text)
+    article_text = extract_article_block(text, article)
+    if not article_text:
+        return None
+    if lid:
+        lid_text = extract_lid_block(article_text, lid)
+        if lid_text:
+            return lid_text
+    return article_text
+
+
+def extract(url: str, article: str, lid: str | None) -> str:
+    try:
+        result = extract_from_url(tekst_url(url), article, lid)
+        if result:
+            return result
+    except Exception:
         pass
 
-    # 🔴 fallback HTML
     try:
-        r=requests.get(url,timeout=REQUEST_TIMEOUT)
-        soup=BeautifulSoup(r.text,'html.parser')
-        main=soup.select_one('#content') or soup.select_one('main') or soup.body
-        lines=[norm_line(s) for s in main.stripped_strings if norm_line(s)]
-        art=extract_article(lines,article)
-        if art:
-            if lid:
-                lidtxt=extract_lid(art,lid)
-                if lidtxt: return lidtxt
-            return art
-    except:
+        result = extract_from_url(url, article, lid)
+        if result:
+            return result
+    except Exception:
         pass
 
     return 'Artikel niet gevonden'
 
 
-def persist(card,text):
-    p=read_cache_payload(); cards=p.get('cards',[])
-    for c in cards:
-        if c['reference']==card['reference']:
-            c['back']=text; break
+def persist(card, text):
+    payload = read_cache_payload()
+    cards = payload.get('cards', [])
+    for existing in cards:
+        if existing['reference'] == card['reference']:
+            existing['back'] = text
+            break
     else:
-        nc=dict(card); nc['back']=text; cards.append(nc)
-    p['cards']=cards; write_cache_payload(p)
-
-
-def read_cache_payload():
-    if not CACHE_FILE.exists(): return {'cards':[],'errors':[]}
-    try: return json.loads(CACHE_FILE.read_text(encoding='utf-8'))
-    except: return {'cards':[],'errors':[]}
-
-
-def write_cache_payload(payload):
-    CACHE_FILE.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
-
-
-def load_cards():
-    txt=SOURCE_FILE.read_text(encoding='utf-8')
-    cards=[]
-    for line in txt.splitlines():
-        if not line.startswith('* '): continue
-        if '→' not in line: continue
-        ref=line.split('→')[0].strip()[2:]
-        m=re.search(r'\[(.*?)\]\((https?://[^)]+)\)',line)
-        if not m: continue
-        desc,url=m.group(1),m.group(2)
-        am=ARTICLE_RE.search(ref)
-        if not am: continue
-        article=am.group(1)
-        lm=LID_RE.search(ref)
-        lid=lm.group(1) if lm else None
-        law=ref.split(' Artikel:')[0]
-        label=f"{law}, artikel {article}"+(f", lid {lid}" if lid else "")
-        cards.append(dict(law=law,article=article,lid=lid,reference=ref,front=desc,url=url,label=label))
-
-    payload=read_cache_payload()
-    for c in cards:
-        for pc in payload.get('cards',[]):
-            if pc['reference']==c['reference']:
-                c['back']=pc.get('back')
-
-    return cards
+        new_card = dict(card)
+        new_card['back'] = text
+        cards.append(new_card)
+    payload['cards'] = cards
+    write_cache_payload(payload)
 
 
 def get_back(card):
-    if card.get('back'): return card['back']
-    t=extract(card['url'],card['article'],card['lid'])
-    persist(card,t); card['back']=t
-    return t
+    if card.get('back'):
+        return card['back']
+    text = extract(card['url'], card['article'], card['lid'])
+    persist(card, text)
+    card['back'] = text
+    return text
 
 
 def reload_card():
-    c=st.session_state.get('current_card')
-    if not c: return
-    t=extract(c['url'],c['article'],c['lid'])
-    persist(c,t)
-    st.session_state.current_card['back']=t
-    st.session_state.back_text=t
+    card = st.session_state.get('current_card')
+    if not card:
+        return
+    text = extract(card['url'], card['article'], card['lid'])
+    persist(card, text)
+    st.session_state.current_card['back'] = text
+    st.session_state.back_text = text
 
 
 def main():
     st.title('Q4 flashcards')
 
-    cards=load_cards()
-    laws=sorted({c['law'] for c in cards})
-    sel=st.multiselect('Filter op wet',[ALL_LAWS_LABEL]+laws,default=[ALL_LAWS_LABEL])
-    if ALL_LAWS_LABEL not in sel:
-        cards=[c for c in cards if c['law'] in sel]
+    cards, _ = load_cards()
+    laws = sorted({card['law'] for card in cards})
+    selection = st.multiselect('Filter op wet', [ALL_LAWS_LABEL] + laws, default=[ALL_LAWS_LABEL])
+    if ALL_LAWS_LABEL not in selection:
+        cards = [card for card in cards if card['law'] in selection]
 
     if 'current_card' not in st.session_state:
-        st.session_state.current_card=random.choice(cards)
-        st.session_state.back_text=get_back(st.session_state.current_card)
+        st.session_state.current_card = random.choice(cards)
+        st.session_state.back_text = get_back(st.session_state.current_card)
 
-    col1,col2=st.columns(2)
+    col1, col2 = st.columns(2)
     with col1:
         if st.button('Nieuwe kaart'):
-            st.session_state.current_card=random.choice(cards)
-            st.session_state.back_text=get_back(st.session_state.current_card)
+            st.session_state.current_card = random.choice(cards)
+            st.session_state.back_text = get_back(st.session_state.current_card)
     with col2:
         if st.button('Herlaad wet'):
             reload_card()
 
-    c=st.session_state.current_card
-    st.subheader(c['label'])
-
-    st.markdown(f'<a href="{c["url"]}" target="_blank">{c["front"]}</a>', unsafe_allow_html=True)
+    card = st.session_state.current_card
+    st.subheader(card['label'])
+    st.markdown(f'<a href="{card["url"]}" target="_blank">{card["front"]}</a>', unsafe_allow_html=True)
 
     with st.expander('Achterkant'):
-        st.text_area('Wettekst',st.session_state.back_text,height=420)
+        st.text_area('Wettekst', st.session_state.back_text, height=420)
 
-if __name__=='__main__': main()
+
+if __name__ == '__main__':
+    main()
