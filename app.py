@@ -13,7 +13,7 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.3)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.4)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -134,6 +134,16 @@ def build_tekst_url(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment))
 
 
+def is_article_heading(line: str) -> bool:
+    return bool(re.match(r'^Artikel\s+[0-9A-Za-z:.]+(?:\b|[\s.:-])', line, re.IGNORECASE))
+
+
+def is_lid_start(line: str, lid: str | None = None) -> bool:
+    if lid is not None:
+        return bool(re.match(rf'^{re.escape(lid)}[.:)]\s+', line))
+    return bool(re.match(r'^\d+[.:)]\s+', line))
+
+
 def extract_article(page_lines, article):
     start = None
     for index, line in enumerate(page_lines):
@@ -147,10 +157,10 @@ def extract_article(page_lines, article):
     content_found = False
 
     for line in page_lines[start + 1:]:
-        if re.match(r'^Artikel\s+[0-9A-Za-z:.]+(?:\b|[\s.:-])', line, re.IGNORECASE):
+        if is_article_heading(line):
             break
         block.append(line)
-        if not re.match(r'^(Artikel|Lid|Opschrift|Titeldeel|Hoofdstuk|Afdeling)\b', line, re.IGNORECASE):
+        if not re.match(r'^(Artikel|Opschrift|Titeldeel|Hoofdstuk|Afdeling)\b', line, re.IGNORECASE):
             content_found = True
 
     result = '\n'.join(block).strip()
@@ -164,7 +174,7 @@ def extract_lid(article_text, lid):
     start = None
 
     for index, line in enumerate(lines):
-        if re.match(rf'^{re.escape(lid)}[.:)]\s+', line):
+        if is_lid_start(line, lid):
             start = index
             break
     if start is None:
@@ -172,9 +182,9 @@ def extract_lid(article_text, lid):
 
     block = [lines[start]]
     for line in lines[start + 1:]:
-        if re.match(r'^\d+[.:)]\s+', line):
+        if is_lid_start(line):
             break
-        if re.match(r'^Artikel\s+[0-9A-Za-z:.]+(?:\b|[\s.:-])', line, re.IGNORECASE):
+        if is_article_heading(line):
             break
         block.append(line)
 
