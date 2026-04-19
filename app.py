@@ -1,4 +1,5 @@
 import html
+import json
 import random
 import re
 from pathlib import Path
@@ -9,8 +10,9 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
+CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/2.2)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.0)'
 ALL_LAWS_LABEL = 'Alle wetten'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
@@ -69,7 +71,7 @@ def parse_line(line: str):
 
 
 @st.cache_data(show_spinner=False)
-def load_cards():
+def load_source_cards():
     text = DATA_FILE.read_text(encoding='utf-8')
     cards = []
     skipped = []
@@ -86,11 +88,18 @@ def load_cards():
     return cards, skipped
 
 
+def normalize_text(text: str) -> str:
+    text = html.unescape(text or '').replace('\xa0', ' ')
+    text = re.sub(r'\r', '', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 def clean_lines(strings):
     output = []
     for value in strings:
-        value = html.unescape(value).replace('\xa0', ' ').strip()
-        value = re.sub(r'\s+', ' ', value)
+        value = normalize_text(value)
         if not value or value in NOISE:
             continue
         output.append(value)
@@ -168,12 +177,36 @@ def extract_text(url, article, lid):
     return article_text
 
 
-@st.cache_data(show_spinner=True)
-def get_text(url, article, lid):
-    try:
-        return extract_text(url, article, lid)
-    except Exception as exc:
-        return f'Fout bij ophalen van de wettekst: {exc}'
+def build_cache(cards):
+    cached_cards = []
+    errors = []
+
+    for card in cards:
+        cached_card = dict(card)
+        try:
+            cached_card['back'] = extract_text(card['url'], card['article'], card['lid'])
+        except Exception as exc:
+            cached_card['back'] = f'Fout bij ophalen van de wettekst: {exc}'
+            errors.append(card['reference'])
+        cached_cards.append(cached_card)
+
+    payload = {'cards': cached_cards, 'errors': errors}
+    CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    return payload
+
+
+@st.cache_data(show_spinner=False)
+def load_cached_cards():
+    if CACHE_FILE.exists():
+        try:
+            payload = json.loads(CACHE_FILE.read_text(encoding='utf-8'))
+            if payload.get('cards'):
+                return payload
+        except Exception:
+            pass
+
+    source_cards, _ = load_source_cards()
+    return build_cache(source_cards)
 
 
 def get_law_options(cards):
@@ -198,14 +231,15 @@ def pick_new_card(cards, current_reference=None):
 
 def set_current_card(card):
     st.session_state.current_card = card
-    st.session_state.back_text = get_text(card['url'], card['article'], card['lid'])
+    st.session_state.back_text = card.get('back', '')
 
 
 def main():
     st.set_page_config(page_title='Q4 flashcards', page_icon='⚖️', layout='centered')
     st.title('Q4 flashcards')
 
-    cards, skipped = load_cards()
+    payload = load_cached_cards()
+    cards = payload.get('cards', [])
     law_options = get_law_options(cards)
 
     selected_laws = st.multiselect(
@@ -216,7 +250,7 @@ def main():
     )
 
     filtered_cards = filter_cards_by_laws(cards, selected_laws)
-    st.caption(f'{len(filtered_cards)} kaartjes beschikbaar. {len(skipped)} regels overgeslagen.')
+    st.caption(f'{len(filtered_cards)} kaartjes beschikbaar. Cache: {len(cards)} kaartjes.')
 
     if not filtered_cards:
         st.error('Geen bruikbare kaartjes binnen deze selectie.')
@@ -227,10 +261,19 @@ def main():
     if not current_card or current_card['reference'] not in valid_refs:
         set_current_card(pick_new_card(filtered_cards))
 
-    if st.button('Nieuwe kaart', use_container_width=True):
-        current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
-        set_current_card(pick_new_card(filtered_cards, current_ref))
-        st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button('Nieuwe kaart', use_container_width=True):
+            current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
+            set_current_card(pick_new_card(filtered_cards, current_ref))
+            st.rerun()
+    with col2:
+        if st.button('Cache opnieuw opbouwen', use_container_width=True):
+            load_source_cards.clear()
+            load_cached_cards.clear()
+            source_cards, _ = load_source_cards()
+            build_cache(source_cards)
+            st.rerun()
 
     card = st.session_state.current_card
     st.subheader(card['label'])
@@ -238,6 +281,11 @@ def main():
 
     with st.expander('Achterkant', expanded=False):
         st.text_area('Wettekst', st.session_state.get('back_text', ''), height=420)
+
+    if payload.get('errors'):
+        with st.expander('Cachefouten', expanded=False):
+            for item in payload['errors']:
+                st.write(f'- {item}')
 
 
 if __name__ == '__main__':
