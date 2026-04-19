@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.4)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.5)'
 ALL_LAWS_LABEL = 'Alle wetten'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
@@ -115,35 +115,42 @@ def _remove_noise_lines(text: str) -> str:
     return _normalize_text('\n'.join(cleaned_lines))
 
 
+def _looks_like_article_start(text: str, article: str) -> bool:
+    escaped = re.escape(str(article).strip())
+    patterns = [
+        rf'^artikel\s+{escaped}(?:\b|[\s.:])',
+        rf'^art\.\s*{escaped}(?:\b|[\s.:])',
+    ]
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+
 def _find_best_article_container(soup: BeautifulSoup, article: str):
     article_text = str(article).strip()
     escaped = re.escape(article_text)
 
-    id_patterns = [
-        rf'artikel[.\-:_]?{escaped}(?:\b|$)',
-        rf'art[.\-:_]?{escaped}(?:\b|$)',
-    ]
     for element in soup.find_all(id=True):
         element_id = element.get('id', '')
-        if any(re.search(pattern, element_id, re.IGNORECASE) for pattern in id_patterns):
+        if re.search(rf'artikel[.\-:_]?{escaped}(?:\b|$)', element_id, re.IGNORECASE):
             return element
 
-    text_patterns = [
-        rf'^artikel\s+{escaped}[\s.:]',
-        rf'^artikel\s+{escaped}$',
-    ]
-    candidate_tags = ['article', 'div', 'section']
-    for tag in candidate_tags:
-        for element in soup.find_all(tag):
-            text = _remove_noise_lines(_normalize_text(element.get_text('\n', strip=True)))
-            if any(re.search(pattern, text, re.IGNORECASE) for pattern in text_patterns):
-                return element
-
-    for element in soup.find_all(['article', 'div', 'section', 'li']):
+    candidate_tags = ['article', 'div', 'section', 'li']
+    for element in soup.find_all(candidate_tags):
         text = _remove_noise_lines(_normalize_text(element.get_text('\n', strip=True)))
-        if any(re.search(pattern, text, re.IGNORECASE) for pattern in text_patterns):
+        if _looks_like_article_start(text, article_text):
             return element
 
+    return None
+
+
+def _extract_article_text_from_page(page_text: str, article: str) -> str | None:
+    escaped = re.escape(str(article).strip())
+    pattern = re.compile(
+        rf'(artikel\s+{escaped}(?:\b|[\s.:]).*?)(?=\nartikel\s+[0-9a-zA-Z:.]+(?:\b|[\s.:])|$)',
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(page_text)
+    if match:
+        return _remove_noise_lines(match.group(1))
     return None
 
 
@@ -153,11 +160,7 @@ def _find_lid_text(article_text: str, lid: str) -> str | None:
     text = article_text.replace('\r\n', '\n')
     lines = [line.strip() for line in text.split('\n') if line.strip()]
 
-    numbered_lines = []
-    for line in lines:
-        if re.match(r'^\d+[.:)]?\s+', line):
-            numbered_lines.append(line)
-
+    numbered_lines = [line for line in lines if re.match(r'^\d+[.:)]?\s+', line)]
     if numbered_lines:
         collecting = False
         collected = []
@@ -197,19 +200,28 @@ def extract_exact_text_from_wetten(url: str, article_hint: str | None = None, li
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, 'html.parser')
-    container = _find_best_article_container(soup, article) if article else None
     page_text = _remove_noise_lines(_normalize_text(soup.get_text('\n', strip=True)))
 
-    if not container:
-        return page_text
+    article_text = None
+    container = _find_best_article_container(soup, article) if article else None
+    if container:
+        candidate = _remove_noise_lines(_normalize_text(container.get_text('\n', strip=True)))
+        if _looks_like_article_start(candidate, article):
+            article_text = candidate
 
-    article_text = _remove_noise_lines(_normalize_text(container.get_text('\n', strip=True)))
+    if not article_text and article:
+        article_text = _extract_article_text_from_page(page_text, article)
+
+    if not article_text:
+        return 'Artikel of lid niet exact gevonden op de bronpagina.'
+
     if lid:
         lid_text = _find_lid_text(article_text, lid)
         if lid_text:
             return lid_text
+        return f'Lid {lid} niet exact gevonden binnen artikel {article}.\n\n{article_text}'
 
-    return article_text or page_text
+    return article_text
 
 
 @st.cache_data(show_spinner=True)
