@@ -10,7 +10,8 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.3)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.4)'
+ALL_LAWS_LABEL = 'Alle wetten'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
@@ -219,6 +220,17 @@ def get_back_text(url: str, article: str | None, lid: str | None) -> str:
         return f'Fout bij ophalen van de wettekst: {exc}'
 
 
+def get_law_options(cards):
+    laws = sorted({card['law'] for card in cards})
+    return [ALL_LAWS_LABEL] + laws
+
+
+def filter_cards_by_laws(cards, selected_laws):
+    if not selected_laws or ALL_LAWS_LABEL in selected_laws:
+        return cards
+    return [card for card in cards if card['law'] in selected_laws]
+
+
 def pick_new_card(cards, current_reference=None):
     if not cards:
         return None
@@ -233,21 +245,31 @@ def main():
     st.title('Q4 flashcards')
 
     cards, skipped = load_cards()
-    st.caption(f'{len(cards)} kaartjes geladen. {len(skipped)} regels overgeslagen.')
+    law_options = get_law_options(cards)
 
-    if not cards:
-        st.error('Geen bruikbare regels gevonden in het bronbestand.')
+    selected_laws = st.multiselect(
+        'Filter op wet',
+        options=law_options,
+        default=[ALL_LAWS_LABEL],
+    )
+
+    filtered_cards = filter_cards_by_laws(cards, selected_laws)
+    st.caption(f'{len(filtered_cards)} kaartjes beschikbaar. {len(skipped)} regels overgeslagen.')
+
+    if not filtered_cards:
+        st.error('Geen bruikbare kaartjes binnen deze selectie.')
         return
 
-    if 'current_card' not in st.session_state:
-        st.session_state.current_card = pick_new_card(cards)
+    current_card = st.session_state.get('current_card')
+    if not current_card or current_card['reference'] not in {card['reference'] for card in filtered_cards}:
+        st.session_state.current_card = pick_new_card(filtered_cards)
         st.session_state.show_back = False
 
     col1, col2 = st.columns(2)
     with col1:
         if st.button('Nieuwe kaart', use_container_width=True):
             current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
-            st.session_state.current_card = pick_new_card(cards, current_ref)
+            st.session_state.current_card = pick_new_card(filtered_cards, current_ref)
             st.session_state.show_back = False
             st.rerun()
     with col2:
