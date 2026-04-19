@@ -2,7 +2,7 @@ import html
 import random
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 import streamlit as st
@@ -10,23 +10,18 @@ from bs4 import BeautifulSoup
 
 DATA_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/1.7)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/2.0)'
 ALL_LAWS_LABEL = 'Alle wetten'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
-NOISE_PHRASES = [
-    'Toon relaties in LiDO',
-    'Maak een permanente link',
-    'Toon wetstechnische informatie',
-    'Gegevens van deze regeling',
-    'Vergelijk met andere versies',
-    'Bekijk wijzigingsinformatie',
-    'Zoek binnen deze regeling',
-    'Selecteer een andere versie',
-    'Druk het regelingonderdeel af',
-    'Sla het regelingonderdeel op',
-]
+
+NOISE = {
+    'Toon relaties in LiDO', 'Maak een permanente link', 'Toon wetstechnische informatie',
+    'Gegevens van deze regeling', 'Vergelijk met andere versies', 'Bekijk wijzigingsinformatie',
+    'Zoek binnen deze regeling', 'Selecteer een andere versie', 'Druk het regelingonderdeel af',
+    'Sla het regelingonderdeel op', 'Permalink', '...'
+}
 
 
 def parse_line(line: str):
@@ -40,14 +35,13 @@ def parse_line(line: str):
 
     ref, rest = body.split('→', 1)
     ref = ref.strip()
-    rest = rest.strip()
 
-    desc_match = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', rest)
-    if not desc_match:
+    match = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', rest)
+    if not match:
         return {'skip': True, 'reason': 'link niet parsebaar', 'reference': ref}
 
-    desc = desc_match.group(1).strip()
-    url = desc_match.group(2).strip()
+    desc = match.group(1).strip()
+    url = match.group(2).strip()
 
     article_match = ARTICLE_RE.search(ref)
     if not article_match:
@@ -56,146 +50,128 @@ def parse_line(line: str):
     article = article_match.group(1).strip()
     lid_match = LID_RE.search(ref)
     lid = lid_match.group(1).strip() if lid_match else None
-    law_name = ref.split(' Artikel:')[0].strip()
+    law = ref.split(' Artikel:')[0].strip()
 
-    label_parts = [law_name, f'artikel {article}']
+    label = f"{law}, artikel {article}"
     if lid:
-        label_parts.append(f'lid {lid}')
+        label += f", lid {lid}"
 
     return {
         'skip': False,
-        'law': law_name,
+        'law': law,
         'article': article,
         'lid': lid,
         'reference': ref,
         'front': desc,
         'url': url,
-        'label': ', '.join(label_parts),
+        'label': label,
     }
 
 
 @st.cache_data(show_spinner=False)
 def load_cards():
-    md_text = DATA_FILE.read_text(encoding='utf-8')
+    text = DATA_FILE.read_text(encoding='utf-8')
     cards = []
     skipped = []
 
-    for raw_line in md_text.splitlines():
-        parsed = parse_line(raw_line)
+    for line in text.splitlines():
+        parsed = parse_line(line)
         if not parsed:
             continue
         if parsed.get('skip'):
-            skipped.append((parsed.get('reference', raw_line.strip()), parsed['reason']))
+            skipped.append((parsed.get('reference', line.strip()), parsed.get('reason', 'overgeslagen')))
             continue
         cards.append(parsed)
 
     return cards, skipped
 
 
-def _normalize_text(text: str) -> str:
-    text = html.unescape(text or '')
-    text = text.replace('\xa0', ' ')
-    text = re.sub(r'\r', '', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = re.sub(r'[ \t]+', ' ', text)
-    return text.strip()
-
-
-def _remove_noise_lines(text: str) -> str:
-    cleaned_lines = []
-    for raw_line in text.split('\n'):
-        line = raw_line.strip()
-        if not line:
+def clean_lines(strings):
+    output = []
+    for value in strings:
+        value = html.unescape(value).replace('\xa0', ' ').strip()
+        value = re.sub(r'\s+', ' ', value)
+        if not value or value in NOISE:
             continue
-        if line in NOISE_PHRASES:
-            continue
-        if line == '...':
-            continue
-        cleaned_lines.append(line)
-    return _normalize_text('\n'.join(cleaned_lines))
+        output.append(value)
+    return output
 
 
-def _build_clean_text_url(url: str) -> str:
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query)
-    params['tekst'] = ['1']
-    clean_query = urlencode(params, doseq=True)
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, clean_query, parsed.fragment))
-
-
-def _extract_article_block(page_text: str, article: str) -> str | None:
-    article_value = re.escape(str(article).strip())
-    start_pattern = re.compile(rf'(?im)^artikel\s+{article_value}(?:[\s.:]|$)')
-    starts = list(start_pattern.finditer(page_text))
-    if not starts:
+def extract_article(page_lines, article):
+    start = None
+    for index, line in enumerate(page_lines):
+        if re.match(rf'^Artikel\s+{re.escape(article)}(?:\b|[\s.:-])', line, re.IGNORECASE):
+            start = index
+            break
+    if start is None:
         return None
 
-    start = starts[0].start()
-    end_pattern = re.compile(r'(?im)^artikel\s+[0-9a-zA-Z:.]+(?:[\s.:]|$)')
-    end = len(page_text)
-    for match in end_pattern.finditer(page_text, starts[0].end()):
-        end = match.start()
-        break
+    block = [page_lines[start]]
+    content_found = False
 
-    block = page_text[start:end].strip()
-    return _remove_noise_lines(block)
+    for line in page_lines[start + 1:]:
+        if re.match(r'^Artikel\s+[0-9A-Za-z:.]+(?:\b|[\s.:-])', line, re.IGNORECASE):
+            break
+        block.append(line)
+        if not re.match(r'^(Artikel|Lid)\b', line, re.IGNORECASE):
+            content_found = True
 
-
-def _extract_lid_from_article(article_text: str, lid: str) -> str | None:
-    lid_value = re.escape(str(lid).strip())
-    text = article_text.replace('\r\n', '\n')
-
-    multiline_pattern = re.compile(
-        rf'(?ms)^\s*{lid_value}[.:)]?\s+.*?(?=^\s*\d+[.:)]?\s+|\Z)'
-    )
-    match = multiline_pattern.search(text)
-    if match:
-        return _remove_noise_lines(match.group(0))
-
-    singleline_pattern = re.compile(rf'(?m)^\s*{lid_value}[.:)]?\s+.+$')
-    match = singleline_pattern.search(text)
-    if match:
-        return _remove_noise_lines(match.group(0))
-
-    return None
+    result = '\n'.join(block).strip()
+    if not content_found and len(block) <= 2:
+        return None
+    return result
 
 
-def extract_exact_text_from_wetten(url: str, article_hint: str | None = None, lid_hint: str | None = None) -> str:
+def extract_lid(article_text, lid):
+    lines = [line.strip() for line in article_text.split('\n') if line.strip()]
+    start = None
+
+    for index, line in enumerate(lines):
+        if re.match(rf'^{re.escape(lid)}[.:)]\s+', line):
+            start = index
+            break
+    if start is None:
+        return None
+
+    block = [lines[start]]
+    for line in lines[start + 1:]:
+        if re.match(r'^\d+[.:)]\s+', line):
+            break
+        if re.match(r'^Artikel\s+[0-9A-Za-z:.]+(?:\b|[\s.:-])', line, re.IGNORECASE):
+            break
+        block.append(line)
+
+    return '\n'.join(block).strip()
+
+
+def extract_text(url, article, lid):
     parsed = urlparse(url)
     if 'wetten.overheid.nl' not in parsed.netloc:
         return 'Geen ondersteunde bron voor exacte wettekst.'
 
-    params = parse_qs(parsed.query)
-    article = params.get('artikel', [None])[0] or article_hint
-    lid = params.get('lid', [None])[0] or lid_hint
-
-    fetch_url = _build_clean_text_url(url)
-    response = requests.get(fetch_url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
+    response = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, 'html.parser')
-    page_text = _remove_noise_lines(_normalize_text(soup.get_text('\n', strip=True)))
+    main = soup.select_one('#content') or soup.select_one('main') or soup.body
+    lines = clean_lines(main.stripped_strings if main else soup.stripped_strings)
 
-    if not article:
-        return page_text
-
-    article_text = _extract_article_block(page_text, article)
+    article_text = extract_article(lines, article)
     if not article_text:
-        return 'Artikel of lid niet exact gevonden op de bronpagina.'
+        return 'Artikel niet gevonden op de bronpagina.'
 
     if lid:
-        lid_text = _extract_lid_from_article(article_text, lid)
+        lid_text = extract_lid(article_text, lid)
         if lid_text:
             return lid_text
-        return article_text
 
     return article_text
 
 
 @st.cache_data(show_spinner=True)
-def get_back_text(url: str, article: str | None, lid: str | None) -> str:
+def get_text(url, article, lid):
     try:
-        return extract_exact_text_from_wetten(url, article, lid)
+        return extract_text(url, article, lid)
     except Exception as exc:
         return f'Fout bij ophalen van de wettekst: {exc}'
 
@@ -241,7 +217,8 @@ def main():
         return
 
     current_card = st.session_state.get('current_card')
-    if not current_card or current_card['reference'] not in {card['reference'] for card in filtered_cards}:
+    valid_refs = {card['reference'] for card in filtered_cards}
+    if not current_card or current_card['reference'] not in valid_refs:
         st.session_state.current_card = pick_new_card(filtered_cards)
         st.session_state.show_back = False
 
@@ -259,21 +236,16 @@ def main():
 
     card = st.session_state.current_card
     st.subheader(card['label'])
-    st.markdown(f'**Voorkant:** {card["front"]}')
-    st.markdown(f'**Bronregel:** {card["reference"]}')
 
     if st.session_state.show_back:
-        st.markdown('### Achterkant')
-        back_text = get_back_text(card['url'], card['article'], card['lid'])
-        st.text_area('Exacte wettekst', back_text, height=420)
+        back_text = get_text(card['url'], card['article'], card['lid'])
+        st.text_area('Wettekst', back_text, height=420)
     else:
-        st.info('Klik op **Draai kaart** voor de exacte wettekst.')
+        st.write(card['front'])
 
     with st.expander('Overgeslagen regels'):
         for item, reason in skipped:
             st.write(f'- {item} ({reason})')
-
-    st.caption('Start met: streamlit run app.py')
 
 
 if __name__ == '__main__':
