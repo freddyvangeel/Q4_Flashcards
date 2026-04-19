@@ -13,332 +13,189 @@ CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 ALL_LAWS_LABEL = 'Alle wetten'
 REQUEST_TIMEOUT = 20
-USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.5)'
+USER_AGENT = 'Mozilla/5.0 (compatible; Q4Flashcards/4.6)'
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
 
 NOISE = {
-    'Toon relaties in LiDO', 'Maak een permanente link', 'Toon wetstechnische informatie',
-    'Gegevens van deze regeling', 'Vergelijk met andere versies', 'Bekijk wijzigingsinformatie',
-    'Zoek binnen deze regeling', 'Selecteer een andere versie', 'Druk het regelingonderdeel af',
-    'Sla het regelingonderdeel op', 'Permalink', '...'
+    'Toon relaties in LiDO','Maak een permanente link','Toon wetstechnische informatie',
+    'Gegevens van deze regeling','Vergelijk met andere versies','Bekijk wijzigingsinformatie',
+    'Zoek binnen deze regeling','Selecteer een andere versie','Druk het regelingonderdeel af',
+    'Sla het regelingonderdeel op','Permalink','...'
 }
 
 
 def parse_line(line: str):
-    line = line.strip()
-    if not line.startswith('* '):
-        return None
-    body = line[2:].strip()
-    if '→' not in body:
-        return {'skip': True}
-    ref, rest = body.split('→', 1)
-    ref = ref.strip()
-    match = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', rest)
-    if not match:
-        return {'skip': True}
-    desc = match.group(1).strip()
-    url = match.group(2).strip()
-    article_match = ARTICLE_RE.search(ref)
-    if not article_match:
-        return {'skip': True}
-    article = article_match.group(1).strip()
-    lid_match = LID_RE.search(ref)
-    lid = lid_match.group(1).strip() if lid_match else None
-    law = ref.split(' Artikel:')[0].strip()
-    label = f"{law}, artikel {article}"
-    if lid:
-        label += f", lid {lid}"
-    return {
-        'skip': False,
-        'law': law,
-        'article': article,
-        'lid': lid,
-        'reference': ref,
-        'front': desc,
-        'url': url,
-        'label': label,
-    }
+    line=line.strip()
+    if not line.startswith('* '): return None
+    body=line[2:].strip()
+    if '→' not in body: return {'skip':True}
+    ref,rest=body.split('→',1)
+    ref=ref.strip()
+    m=re.search(r'\[(.*?)\]\((https?://[^)]+)\)',rest)
+    if not m: return {'skip':True}
+    desc,url=m.group(1).strip(),m.group(2).strip()
+    am=ARTICLE_RE.search(ref)
+    if not am: return {'skip':True}
+    article=am.group(1).strip()
+    lm=LID_RE.search(ref)
+    lid=lm.group(1).strip() if lm else None
+    law=ref.split(' Artikel:')[0].strip()
+    label=f"{law}, artikel {article}"+(f", lid {lid}" if lid else "")
+    return dict(skip=False,law=law,article=article,lid=lid,reference=ref,front=desc,url=url,label=label)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data
 def load_source_cards():
-    text = SOURCE_FILE.read_text(encoding='utf-8')
-    cards = []
-    for line in text.splitlines():
-        parsed = parse_line(line)
-        if parsed and not parsed.get('skip'):
-            cards.append(parsed)
-    return cards
+    txt=SOURCE_FILE.read_text(encoding='utf-8')
+    return [p for l in txt.splitlines() if (p:=parse_line(l)) and not p.get('skip')]
 
 
 def read_cache_payload():
-    if not CACHE_FILE.exists():
-        return {'cards': [], 'errors': []}
-    try:
-        return json.loads(CACHE_FILE.read_text(encoding='utf-8'))
-    except Exception:
-        return {'cards': [], 'errors': []}
+    if not CACHE_FILE.exists(): return {'cards':[],'errors':[]}
+    try: return json.loads(CACHE_FILE.read_text(encoding='utf-8'))
+    except: return {'cards':[],'errors':[]}
 
 
 def write_cache_payload(payload):
-    CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    CACHE_FILE.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
 
 
 def load_cards():
-    source_cards = load_source_cards()
-    by_reference = {card['reference']: dict(card) for card in source_cards}
-    payload = read_cache_payload()
-    errors = payload.get('errors', [])
-    for cached in payload.get('cards', []):
-        ref = cached.get('reference')
-        if ref in by_reference and cached.get('back'):
-            by_reference[ref]['back'] = cached.get('back', '')
-    return list(by_reference.values()), errors
+    src=load_source_cards()
+    by_ref={c['reference']:dict(c) for c in src}
+    payload=read_cache_payload()
+    for c in payload.get('cards',[]):
+        if c.get('reference') in by_ref and c.get('back'):
+            by_ref[c['reference']]['back']=c['back']
+    return list(by_ref.values()),payload.get('errors',[])
 
 
-def normalize_text(text: str) -> str:
-    text = html.unescape(text or '').replace('\xa0', ' ')
-    text = re.sub(r'\r', '', text)
-    text = re.sub(r'[ \t]+', ' ', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
+def norm(t):
+    t=html.unescape(t or '').replace('\xa0',' ')
+    t=re.sub(r'\s+',' ',t)
+    return t.strip()
 
 
-def clean_lines(strings):
-    output = []
-    for value in strings:
-        value = normalize_text(value)
-        if not value or value in NOISE:
-            continue
-        output.append(value)
-    return output
+def tekst_url(url):
+    p=urlparse(url); q=parse_qs(p.query); q['tekst']=['1']
+    return urlunparse((p.scheme,p.netloc,p.path,p.params,urlencode(q,doseq=True),p.fragment))
+
+# 🔴 STRIKT: alleen losse artikelkop
+
+def is_article_heading(line):
+    return bool(re.match(r'^Artikel\s+\d+[a-zA-Z]*\s*$', line.strip()))
 
 
-def build_tekst_url(url: str) -> str:
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query)
-    params['tekst'] = ['1']
-    query = urlencode(params, doseq=True)
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment))
+def is_article_start(line,article):
+    return bool(re.match(rf'^Artikel\s+{re.escape(article)}\s*$', line.strip(), re.I))
 
 
-def is_article_heading(line: str) -> bool:
-    line = line.strip()
-    return bool(re.match(r'^Artikel\s+[0-9A-Za-z:.]+\s*$', line, re.IGNORECASE))
+def is_lid_start(line,lid=None):
+    if lid: return bool(re.match(rf'^{re.escape(lid)}[.:)]\s+',line.strip()))
+    return bool(re.match(r'^\d+[.:)]\s+',line.strip()))
 
 
-def is_article_start(line: str, article: str) -> bool:
-    line = line.strip()
-    escaped = re.escape(article)
-    return bool(re.match(rf'^Artikel\s+{escaped}(?:\s*$|\s*[\[(])', line, re.IGNORECASE))
+def extract_article(lines,article):
+    start=None
+    for i,l in enumerate(lines):
+        if is_article_start(l,article):
+            start=i; break
+    if start is None: return None
 
-
-def is_lid_start(line: str, lid: str | None = None) -> bool:
-    line = line.strip()
-    if lid is not None:
-        return bool(re.match(rf'^{re.escape(lid)}[.:)]\s+', line))
-    return bool(re.match(r'^\d+[.:)]\s+', line))
-
-
-def extract_article(page_lines, article):
-    start = None
-    for index, line in enumerate(page_lines):
-        if is_article_start(line, article):
-            start = index
-            break
-    if start is None:
-        return None
-
-    block = [page_lines[start]]
-    content_found = False
-    for line in page_lines[start + 1:]:
-        if is_article_heading(line):
-            break
-        block.append(line)
-        if not re.match(r'^(Artikel|Opschrift|Titeldeel|Hoofdstuk|Afdeling)\b', line, re.IGNORECASE):
-            content_found = True
-
-    result = '\n'.join(block).strip()
-    if not content_found and len(block) <= 2:
-        return None
-    return result
-
-
-def extract_lid(article_text, lid):
-    lines = [line.strip() for line in article_text.split('\n') if line.strip()]
-    start = None
-    for index, line in enumerate(lines):
-        if is_lid_start(line, lid):
-            start = index
-            break
-    if start is None:
-        return None
-
-    block = [lines[start]]
-    for line in lines[start + 1:]:
-        if is_lid_start(line):
-            break
-        if is_article_heading(line):
-            break
-        block.append(line)
+    block=[lines[start]]
+    for l in lines[start+1:]:
+        if is_article_heading(l): break
+        block.append(l)
     return '\n'.join(block).strip()
 
 
-def extract_from_tekst_variant(url, article, lid):
-    response = requests.get(build_tekst_url(url), headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, 'html.parser')
-    text = normalize_text(soup.get_text('\n', strip=True))
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    article_text = extract_article(lines, article)
-    if not article_text:
-        return None
-    if lid:
-        lid_text = extract_lid(article_text, lid)
-        if lid_text:
-            return lid_text
-    return article_text
+def extract_lid(text,lid):
+    lines=[l.strip() for l in text.split('\n') if l.strip()]
+    start=None
+    for i,l in enumerate(lines):
+        if is_lid_start(l,lid): start=i; break
+    if start is None: return None
+
+    block=[lines[start]]
+    for l in lines[start+1:]:
+        if is_lid_start(l): break
+        if is_article_heading(l): break
+        block.append(l)
+    return '\n'.join(block)
 
 
-def extract_from_html_variant(url, article, lid):
-    response = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, 'html.parser')
-    main = soup.select_one('#content') or soup.select_one('main') or soup.body
-    lines = clean_lines(main.stripped_strings if main else soup.stripped_strings)
-    article_text = extract_article(lines, article)
-    if not article_text:
-        return None
-    if lid:
-        lid_text = extract_lid(article_text, lid)
-        if lid_text:
-            return lid_text
-    return article_text
-
-
-def fetch_live_text(url, article, lid):
+def extract(url,article,lid):
     try:
-        result = extract_from_tekst_variant(url, article, lid)
-        if result:
-            return result
-    except Exception:
-        pass
-    try:
-        result = extract_from_html_variant(url, article, lid)
-        if result:
-            return result
-    except Exception:
-        pass
-    return 'Artikel niet gevonden op de bronpagina.'
+        r=requests.get(tekst_url(url),timeout=REQUEST_TIMEOUT)
+        txt=norm(r.text)
+        lines=[l.strip() for l in txt.split('\n') if l.strip()]
+        art=extract_article(lines,article)
+        if art:
+            if lid:
+                lidtxt=extract_lid(art,lid)
+                if lidtxt: return lidtxt
+            return art
+    except: pass
+
+    return 'Artikel niet gevonden'
 
 
-def persist_card_back(card, back_text):
-    payload = read_cache_payload()
-    cards = payload.get('cards', [])
-    updated = False
-    for item in cards:
-        if item.get('reference') == card['reference']:
-            item['back'] = back_text
-            updated = True
-            break
-    if not updated:
-        cached_card = dict(card)
-        cached_card['back'] = back_text
-        cards.append(cached_card)
-    payload['cards'] = cards
-    payload.setdefault('errors', [])
-    write_cache_payload(payload)
+def persist(card,text):
+    p=read_cache_payload(); cards=p.get('cards',[])
+    for c in cards:
+        if c['reference']==card['reference']:
+            c['back']=text; break
+    else:
+        nc=dict(card); nc['back']=text; cards.append(nc)
+    p['cards']=cards; write_cache_payload(p)
 
 
-def get_back_text(card):
-    if card.get('back'):
-        return card['back']
-    back_text = fetch_live_text(card['url'], card['article'], card['lid'])
-    persist_card_back(card, back_text)
-    card['back'] = back_text
-    return back_text
+def get_back(card):
+    if card.get('back'): return card['back']
+    t=extract(card['url'],card['article'],card['lid'])
+    persist(card,t); card['back']=t
+    return t
 
 
-def reload_current_card_back():
-    card = st.session_state.get('current_card')
-    if not card:
-        return
-    back_text = fetch_live_text(card['url'], card['article'], card['lid'])
-    persist_card_back(card, back_text)
-    st.session_state.current_card['back'] = back_text
-    st.session_state.back_text = back_text
-
-
-def get_law_options(cards):
-    laws = sorted({card['law'] for card in cards})
-    return [ALL_LAWS_LABEL] + laws
-
-
-def filter_cards_by_laws(cards, selected_laws):
-    if not selected_laws or ALL_LAWS_LABEL in selected_laws:
-        return cards
-    return [card for card in cards if card['law'] in selected_laws]
-
-
-def pick_new_card(cards, current_reference=None):
-    if not cards:
-        return None
-    if len(cards) == 1:
-        return cards[0]
-    filtered = [card for card in cards if card['reference'] != current_reference]
-    return random.choice(filtered or cards)
-
-
-def set_current_card(card):
-    st.session_state.current_card = card
-    st.session_state.back_text = get_back_text(card)
+def reload_card():
+    c=st.session_state.get('current_card')
+    if not c: return
+    t=extract(c['url'],c['article'],c['lid'])
+    persist(c,t)
+    st.session_state.current_card['back']=t
+    st.session_state.back_text=t
 
 
 def main():
-    st.set_page_config(page_title='Q4 flashcards', page_icon='⚖️', layout='centered')
     st.title('Q4 flashcards')
 
-    cards, errors = load_cards()
-    law_options = get_law_options(cards)
-    selected_laws = st.multiselect('Filter op wet', options=law_options, default=[ALL_LAWS_LABEL], key='law_filter')
-    filtered_cards = filter_cards_by_laws(cards, selected_laws)
-    cached_count = sum(1 for card in cards if card.get('back'))
-    st.caption(f'{len(filtered_cards)} kaartjes beschikbaar. Cache gevuld: {cached_count}/{len(cards)}.')
+    cards,_=load_cards()
+    laws=sorted({c['law'] for c in cards})
+    sel=st.multiselect('Filter op wet',[ALL_LAWS_LABEL]+laws,default=[ALL_LAWS_LABEL])
+    if ALL_LAWS_LABEL not in sel:
+        cards=[c for c in cards if c['law'] in sel]
 
-    if not filtered_cards:
-        st.error('Geen bruikbare kaartjes binnen deze selectie.')
-        return
+    if 'current_card' not in st.session_state:
+        st.session_state.current_card=random.choice(cards)
+        st.session_state.back_text=get_back(st.session_state.current_card)
 
-    current_card = st.session_state.get('current_card')
-    valid_refs = {card['reference'] for card in filtered_cards}
-    if not current_card or current_card['reference'] not in valid_refs:
-        set_current_card(pick_new_card(filtered_cards))
-
-    col1, col2 = st.columns(2)
+    col1,col2=st.columns(2)
     with col1:
-        if st.button('Nieuwe kaart', use_container_width=True):
-            current_ref = st.session_state.current_card['reference'] if st.session_state.current_card else None
-            set_current_card(pick_new_card(filtered_cards, current_ref))
-            st.rerun()
+        if st.button('Nieuwe kaart'):
+            st.session_state.current_card=random.choice(cards)
+            st.session_state.back_text=get_back(st.session_state.current_card)
     with col2:
-        if st.button('Herlaad wet', use_container_width=True):
-            reload_current_card_back()
-            st.rerun()
+        if st.button('Herlaad wet'):
+            reload_card()
 
-    card = st.session_state.current_card
-    st.subheader(card['label'])
-    st.write(card['front'])
+    c=st.session_state.current_card
+    st.subheader(c['label'])
 
-    with st.expander('Achterkant', expanded=False):
-        st.text_area('Wettekst', st.session_state.get('back_text', ''), height=420)
+    st.markdown(f'<a href="{c["url"]}" target="_blank">{c["front"]}</a>', unsafe_allow_html=True)
 
-    if errors:
-        with st.expander('Cachefouten', expanded=False):
-            for item in errors:
-                st.write(f'- {item}')
+    with st.expander('Achterkant'):
+        st.text_area('Wettekst',st.session_state.back_text,height=420)
 
-
-if __name__ == '__main__':
-    main()
+if __name__=='__main__': main()
