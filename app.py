@@ -84,6 +84,11 @@ def is_noise_line(line: str) -> bool:
     return False
 
 
+def is_article_heading_line(line: str) -> bool:
+    line = normalize_spaces(line)
+    return bool(re.match(r'^artikel\s+\d+[a-zA-Z]*\s*$', line, re.I))
+
+
 def format_article_text(text: str) -> str:
     text = remove_noise(text)
     text = re.sub(r' *\n *', '\n', text)
@@ -125,9 +130,10 @@ def extract_article_block_from_lines(lines: list[str], article_num: str) -> list
 
     block = [lines[start_index]]
     for line in lines[start_index + 1:]:
-        match = re.match(r'^artikel\s+(\d+[a-zA-Z]*)\b', line, re.I)
-        if match and match.group(1).strip().lower() != article_key:
-            break
+        if is_article_heading_line(line):
+            next_article = re.match(r'^artikel\s+(\d+[a-zA-Z]*)\s*$', line, re.I)
+            if next_article and next_article.group(1).strip().lower() != article_key:
+                break
         if is_header_line(line):
             break
         if is_noise_line(line):
