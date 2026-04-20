@@ -44,17 +44,22 @@ def write_cache_payload(payload):
 
 def normalize_spaces(text: str) -> str:
     text = html.unescape(text or '').replace('\xa0', ' ')
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
 
 
-def clean_text(text: str) -> str:
-    text = normalize_spaces(text)
+def remove_noise(text: str) -> str:
+    text = html.unescape(text or '').replace('\xa0', ' ')
     for phrase in NOISE_PHRASES:
         text = text.replace(phrase, ' ')
-    text = re.sub(r'\s+', ' ', text).strip()
-    text = re.sub(r'(?<!\d)(\b\d+\b)\s+', r'\n\1 ', text)
-    text = re.sub(r'\s([a-z]\.)\s+', r'\n\1 ', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def format_article_text(text: str) -> str:
+    text = remove_noise(text)
+    text = re.sub(r'(?m)^(\d+)\s+', r'\1 ', text)
     return text.strip()
 
 
@@ -76,25 +81,41 @@ def find_article_container(soup: BeautifulSoup, article_num: str):
     return None
 
 
-def extract_article_block(text: str, article_num: str) -> str | None:
-    article_key = article_num.strip().lower()
-    start_pattern = re.compile(rf'(?im)^artikel\s+{re.escape(article_num)}(?:\b[^\n]*)?$')
-    start_match = start_pattern.search(text)
-    if not start_match:
-        first_line = text.split('\n', 1)[0].strip()
-        if re.match(rf'^artikel\s+{re.escape(article_num)}(?:\b|\s|\.|\(|\[)', first_line, re.I):
-            return text.strip() if len(text.strip()) >= 20 else None
-        return None
+def container_to_lines(container) -> list[str]:
+    raw = container.get_text('\n', strip=True)
+    raw = html.unescape(raw).replace('\xa0', ' ')
+    lines = []
+    for line in raw.splitlines():
+        line = normalize_spaces(line)
+        if not line:
+            continue
+        if line in NOISE_PHRASES:
+            continue
+        lines.append(line)
+    return lines
 
-    next_article_pattern = re.compile(r'(?im)^artikel\s+(\d+[a-zA-Z]*)(?:\b[^\n]*)?$')
-    end = len(text)
-    for match in next_article_pattern.finditer(text, start_match.end()):
-        if match.group(1).strip().lower() != article_key:
-            end = match.start()
+
+def extract_article_block_from_lines(lines: list[str], article_num: str) -> str | None:
+    article_key = article_num.strip().lower()
+    start_index = None
+
+    for i, line in enumerate(lines):
+        if re.match(rf'^artikel\s+{re.escape(article_num)}(?:\b|\s|\.|\(|\[)', line, re.I):
+            start_index = i
             break
 
-    block = text[start_match.start():end].strip()
-    return block if len(block) >= 20 else None
+    if start_index is None:
+        return None
+
+    block = [lines[start_index]]
+    for line in lines[start_index + 1:]:
+        match = re.match(r'^artikel\s+(\d+[a-zA-Z]*)\b', line, re.I)
+        if match and match.group(1).strip().lower() != article_key:
+            break
+        block.append(line)
+
+    text = '\n'.join(block).strip()
+    return format_article_text(text) if len(text) >= 20 else None
 
 
 def extract_from_url(url: str, article_num: str) -> str | None:
@@ -106,8 +127,8 @@ def extract_from_url(url: str, article_num: str) -> str | None:
     if not container:
         return None
 
-    text = clean_text(container.get_text(' '))
-    return extract_article_block(text, article_num)
+    lines = container_to_lines(container)
+    return extract_article_block_from_lines(lines, article_num)
 
 
 def extract(url, article_num):
