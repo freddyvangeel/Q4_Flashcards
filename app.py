@@ -17,6 +17,7 @@ REQUEST_TIMEOUT = 20
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+?)(?=(?:\s+Lid\s*:|\s+Sub\s*:|$))', re.IGNORECASE)
 LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+?)(?=(?:\s+Sub\s*:|$))', re.IGNORECASE)
+ARTICLE_NUM_PATTERN = r'\d+(?::\d+)?[a-zA-Z]*'
 
 NOISE_PHRASES = [
     'Toon relaties in LiDO',
@@ -86,7 +87,7 @@ def is_noise_line(line: str) -> bool:
 
 def is_article_heading_line(line: str) -> bool:
     line = normalize_spaces(line)
-    return bool(re.match(r'^artikel\s+\d+[a-zA-Z]*\s*$', line, re.I))
+    return bool(re.match(rf'^artikel\s+{ARTICLE_NUM_PATTERN}\s*$', line, re.I))
 
 
 def format_article_text(text: str) -> str:
@@ -121,7 +122,7 @@ def extract_article_block_from_lines(lines: list[str], article_num: str) -> list
     start_index = None
 
     for i, line in enumerate(lines):
-        if re.match(rf'^artikel\s+{re.escape(article_num)}(?:\b|\s|\.|\(|\[)', line, re.I):
+        if re.match(rf'^artikel\s+{re.escape(article_num)}(?:\b|\s|\.|\(|\[|$)', line, re.I):
             start_index = i
             break
 
@@ -131,7 +132,7 @@ def extract_article_block_from_lines(lines: list[str], article_num: str) -> list
     block = [lines[start_index]]
     for line in lines[start_index + 1:]:
         if is_article_heading_line(line):
-            next_article = re.match(r'^artikel\s+(\d+[a-zA-Z]*)\s*$', line, re.I)
+            next_article = re.match(rf'^artikel\s+({ARTICLE_NUM_PATTERN})\s*$', line, re.I)
             if next_article and next_article.group(1).strip().lower() != article_key:
                 break
         if is_header_line(line):
