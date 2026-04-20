@@ -111,7 +111,7 @@ def page_lines_from_html(raw_html: str) -> list[str]:
     return lines
 
 
-def extract_article_block_from_lines(lines: list[str], article_num: str) -> str | None:
+def extract_article_block_from_lines(lines: list[str], article_num: str) -> list[str] | None:
     article_key = article_num.strip().lower()
     start_index = None
 
@@ -134,41 +134,49 @@ def extract_article_block_from_lines(lines: list[str], article_num: str) -> str 
             continue
         block.append(line)
 
-    text = '\n'.join(block).strip()
-    return format_article_text(text) if len(text) >= 20 else None
+    return block if len('\n'.join(block).strip()) >= 20 else None
 
 
-def extract_lid_block(article_text: str, lid: str) -> str | None:
-    lid = (lid or '').strip()
+def is_top_level_lid_line(line: str) -> bool:
+    line = normalize_spaces(line)
+    return bool(re.match(r'^\d+[.:)]?$', line))
+
+
+def extract_lid_block(article_lines: list[str], lid: str | None) -> str | None:
+    if not article_lines:
+        return None
+
     if not lid:
-        return article_text
+        return format_article_text('\n'.join(article_lines))
 
-    lines = [line.strip() for line in article_text.splitlines() if line.strip()]
+    lid = lid.strip()
     start_index = None
-    for i, line in enumerate(lines):
-        if re.match(rf'^{re.escape(lid)}[.:)]?\b', line, re.I):
+
+    for i, line in enumerate(article_lines[1:], start=1):
+        if is_top_level_lid_line(line) and re.match(rf'^{re.escape(lid)}[.:)]?$', line, re.I):
             start_index = i
             break
 
     if start_index is None:
-        return article_text
+        return format_article_text('\n'.join(article_lines))
 
-    block = [lines[start_index]]
-    for line in lines[start_index + 1:]:
-        if re.match(r'^\d+[.:)]?\b', line):
+    block = [article_lines[0], article_lines[start_index]]
+    for line in article_lines[start_index + 1:]:
+        if is_top_level_lid_line(line):
             break
         block.append(line)
-    return '\n'.join(block).strip()
+
+    return format_article_text('\n'.join(block))
 
 
 def extract_from_url(url: str, article_num: str, lid: str | None = None) -> str | None:
     response = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     lines = page_lines_from_html(response.text)
-    article_text = extract_article_block_from_lines(lines, article_num)
-    if not article_text:
+    article_lines = extract_article_block_from_lines(lines, article_num)
+    if not article_lines:
         return None
-    return extract_lid_block(article_text, lid)
+    return extract_lid_block(article_lines, lid)
 
 
 def extract(url, article_num, lid: str | None = None):
