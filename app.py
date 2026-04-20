@@ -49,43 +49,32 @@ def tekst_url(url: str) -> str:
 
 def extract(url, article_num):
     try:
-        # Stap 1: Haal de pagina op
-        r = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
+        f_url = tekst_url(url)
+        r = requests.get(f_url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # Stap 2: Zoek naar specifieke overheid.nl div-structuren
-        # Artikelen zitten vaak in divs met id 'artikel[nummer]' of 'jci...'
+        # Strategie 1: Zoek op ID uit fragment
         fragment = urlparse(url).fragment
         container = None
-        
         if fragment:
             container = soup.find(id=fragment)
-            
-        if not container:
-            # Zoek op 'Artikel X' in koppen of sterke teksten
-            regex = re.compile(rf'Artikel\s+{re.escape(article_num)}\b', re.I)
-            container = soup.find(lambda tag: tag.name in ['h1', 'h2', 'h3', 'div', 'section'] and regex.search(tag.get_text()))
-            
-            if container:
-                # Probeer de bijbehorende content te pakken (meestal de volgende div of parent)
-                parent = container.find_parent('div', class_='cl-content') or container.find_next_sibling('div')
-                if parent:
-                    container = parent
 
-        if container:
+        # Strategie 2: Zoek via Regex in de volledige tekst (omzeilt JS-spring problemen)
+        if not container:
+            full_text = extract_clean_text(soup.find('body'))
+            # Zoek vanaf 'Artikel X' tot het volgende artikel of einde tekst
+            pattern = rf'(Artikel\s+{re.escape(article_num)}\b.*?)(?=Artikel\s+\d+|$)'
+            match = re.search(pattern, full_text, re.S | re.I)
+            if match:
+                return match.group(1).strip()
+        else:
             return extract_clean_text(container)
-            
-        # Stap 3: Ultieme fallback - doorzoek alle tekst op de pagina op patronen
-        all_text = extract_clean_text(soup.find('body'))
-        match = re.search(rf'(Artikel\s+{re.escape(article_num)}.*?)(?=Artikel\s+\d+|$)', all_text, re.S | re.I)
-        if match:
-            return match.group(1).strip()
 
     except Exception as e:
         return f"Fout bij ophalen: {str(e)}"
 
-    return 'Artikel niet gevonden op de pagina.'}"
+    return 'Artikel niet gevonden op de pagina.'
 
 def read_cache():
     if not CACHE_FILE.exists(): return {}
@@ -140,7 +129,6 @@ def main():
         st.warning("Geen kaarten beschikbaar voor deze selectie.")
         return
 
-    # Veilige initialisatie van session state
     if 'current_card' not in st.session_state or \
        st.session_state.current_card.get('id') not in [c['id'] for c in filtered_cards]:
         st.session_state.current_card = random.choice(filtered_cards)
@@ -167,7 +155,6 @@ def main():
     st.info(f"**Vraag:** {card['front']}")
     st.caption(f"[Bronverwijzing]({card['url']})")
 
-    # Automatisch ophalen indien cache leeg is
     if not card.get('back'):
         with st.spinner('Wettekst ophalen...'):
             text = extract(card['url'], card['article'])
