@@ -13,63 +13,143 @@ from bs4 import BeautifulSoup
 CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
 SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+REQUEST_TIMEOUT = 20
 
-def extract_clean_text(container):
-    if not container: return ""
-    raw = container.get_text(separator=" ", strip=True)
-    text = html.unescape(raw).replace('\xa0', ' ')
+NOISE_PHRASES = [
+    'Toon relaties in LiDO',
+    'Maak een permanente link',
+    'Toon wetstechnische informatie',
+    'Gegevens van deze regeling',
+    'Vergelijk met andere versies',
+    'Bekijk wijzigingsinformatie',
+    'Zoek binnen deze regeling',
+    'Selecteer een andere versie',
+    'Druk het regelingonderdeel af',
+    'Sla het regelingonderdeel op',
+]
+
+
+def read_cache_payload():
+    if not CACHE_FILE.exists():
+        return {'cards': []}
+    try:
+        return json.loads(CACHE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {'cards': []}
+
+
+def write_cache_payload(payload):
+    CACHE_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+def normalize_spaces(text: str) -> str:
+    text = html.unescape(text or '').replace('\xa0', ' ')
     text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'(?<!\d)(\d+\.)\s+', r'\n\1 ', text)
     return text.strip()
+
+
+def clean_text(text: str) -> str:
+    text = normalize_spaces(text)
+    for phrase in NOISE_PHRASES:
+        text = text.replace(phrase, ' ')
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'(?<!\d)(\b\d+\b)\s+', r'\n\1 ', text)
+    text = re.sub(r'\s([a-z]\.)\s+', r'\n\1 ', text)
+    return text.strip()
+
+
+def tekst_url(url: str) -> str:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    query['tekst'] = ['1']
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(query, doseq=True), ''))
+
+
+def find_article_container(soup: BeautifulSoup, article_num: str):
+    article_num = article_num.strip().lower()
+    pattern = re.compile(rf'^artikel\s+{re.escape(article_num)}(?:\b|\s|\.|\(|\[)', re.I)
+
+    for node in soup.find_all(['h1', 'h2', 'h3', 'div', 'span', 'strong', 'a']):
+        txt = normalize_spaces(node.get_text(' ', strip=True)).lower()
+        if pattern.match(txt):
+            return node.find_parent(['article', 'section', 'div', 'li']) or node
+    return None
+
+
+def extract_article_block(text: str, article_num: str) -> str | None:
+    article_key = article_num.strip().lower()
+    start_pattern = re.compile(rf'(?im)^artikel\s+{re.escape(article_num)}(?:\b[^\n]*)?$')
+    start_match = start_pattern.search(text)
+    if not start_match:
+        first_line = text.split('\n', 1)[0].strip()
+        if re.match(rf'^artikel\s+{re.escape(article_num)}(?:\b|\s|\.|\(|\[)', first_line, re.I):
+            return text.strip() if len(text.strip()) >= 20 else None
+        return None
+
+    next_article_pattern = re.compile(r'(?im)^artikel\s+(\d+[a-zA-Z]*)(?:\b[^\n]*)?$')
+    end = len(text)
+    for match in next_article_pattern.finditer(text, start_match.end()):
+        if match.group(1).strip().lower() != article_key:
+            end = match.start()
+            break
+
+    block = text[start_match.start():end].strip()
+    return block if len(block) >= 20 else None
+
+
+def extract_from_url(url: str, article_num: str) -> str | None:
+    response = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    container = find_article_container(soup, article_num)
+    if not container:
+        return None
+
+    text = clean_text(container.get_text(' '))
+    return extract_article_block(text, article_num)
+
 
 def extract(url, article_num):
     try:
-        p = urlparse(url)
-        q = parse_qs(p.query); q['tekst'] = ['1']
-        fetch_url = urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(q, doseq=True), ''))
-        
-        r = requests.get(fetch_url, headers={'User-Agent': USER_AGENT}, timeout=15)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, 'html.parser')
+        result = extract_from_url(url, article_num)
+        if result:
+            return result
+    except Exception:
+        pass
 
-        # 1. Zoek het anker/ID uit de URL fragment
-        container = None
-        if p.fragment:
-            container = soup.find(id=p.fragment)
+    try:
+        result = extract_from_url(tekst_url(url), article_num)
+        if result:
+            return result
+    except Exception:
+        pass
 
-        # 2. Als ID niet werkt of alleen de kop bevat, zoek via de tekst
-        if not container or len(container.get_text(strip=True)) < 20:
-            pattern = re.compile(rf'^Artikel\s+{re.escape(article_num)}\b', re.I)
-            # Zoek de specifieke kop
-            target = soup.find(lambda tag: tag.name in ['h1','h2','h3','div','span'] and pattern.match(tag.get_text(strip=True)))
-            
-            if target:
-                # Probeer de parent-container te pakken die de tekst bevat (vaak class 'cl-content')
-                container = target.find_parent('div', class_=re.compile(r'artikel|cl-content|sectie'))
-                
-                # Als dat niet lukt, pakken we de kop en alle broertjes (siblings) daarna
-                if not container:
-                    content_parts = [target.get_text(strip=True)]
-                    for sibling in target.find_next_siblings():
-                        # Stop als we het volgende artikel tegenkomen
-                        if sibling.name in ['h1','h2','h3'] or "Artikel" in sibling.get_text()[:15]:
-                            break
-                        content_parts.append(sibling.get_text(separator=" ", strip=True))
-                    return "\n".join(content_parts)
+    return 'Artikel tekst niet gevonden op pagina.'
 
-        if container:
-            return extract_clean_text(container)
-        
-        # 3. Laatste redding: Regex op de volledige platte tekst van de pagina
-        full_text = extract_clean_text(soup)
-        match = re.search(rf'(Artikel\s+{re.escape(article_num)}\b.*?)(?=Artikel\s+\d+|$)', full_text, re.S | re.I)
-        if match:
-            return match.group(1).strip()
-            
-    except Exception as e:
-        return f"Fout bij ophalen: {str(e)}"
 
-    return "Artikel tekst niet gevonden op pagina."
+def persist(card, text):
+    payload = read_cache_payload()
+    cards = payload.get('cards', [])
+    for existing in cards:
+        if existing.get('id') == card['id']:
+            existing['back'] = text
+            break
+    else:
+        cached = dict(card)
+        cached['back'] = text
+        cards.append(cached)
+    payload['cards'] = cards
+    write_cache_payload(payload)
+
+
+def get_cached_back(card):
+    payload = read_cache_payload()
+    for existing in payload.get('cards', []):
+        if existing.get('id') == card['id'] and existing.get('back'):
+            return existing['back']
+    return ''
+
 
 def load_cards():
     if not SOURCE_FILE.exists():
@@ -78,33 +158,43 @@ def load_cards():
     try:
         content = SOURCE_FILE.read_text(encoding='utf-8')
         for line in content.splitlines():
-            if '→' not in line: continue
-            parts = line.split('→')
+            if '→' not in line:
+                continue
+            parts = line.split('→', 1)
             front_text = parts[0].replace('*', '').strip()
-            
+
             link_match = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', parts[1])
-            if not link_match: continue
-            
+            if not link_match:
+                continue
+
             desc, url = link_match.group(1), link_match.group(2)
             art_match = re.search(r'Artikel\s*:\s*([^\s,]+)', front_text, re.I)
-            article = art_match.group(1) if art_match else ""
+            article = art_match.group(1) if art_match else ''
+            if not article:
+                continue
             law = front_text.split('Artikel:')[0].strip().rstrip(',')
 
-            cards.append({
-                'id': f"{law}_{article}_{desc}"[:50],
-                'law': law, 'article': article, 'front': desc, 'url': url,
-                'label': f"{law} - Art. {article}"
-            })
-    except:
-        st.error("Fout bij lezen bronbestand.")
+            card = {
+                'id': f"{law}_{article}_{desc}"[:120],
+                'law': law,
+                'article': article,
+                'front': desc,
+                'url': url,
+                'label': f"{law} - Art. {article}",
+            }
+            card['back'] = get_cached_back(card)
+            cards.append(card)
+    except Exception:
+        st.error('Fout bij lezen bronbestand.')
     return cards
 
+
 def main():
-    st.set_page_config(page_title="Q4 Flashcards", layout="wide")
-    
+    st.set_page_config(page_title='Q4 Flashcards', layout='wide')
+
     cards = load_cards()
     if not cards:
-        st.error(f"Bestand {SOURCE_FILE.name} is leeg of ontbreekt.")
+        st.error(f'Bestand {SOURCE_FILE.name} is leeg of ontbreekt.')
         return
 
     # Filter
@@ -113,14 +203,15 @@ def main():
     filtered = cards if 'Alle' in sel else [c for c in cards if c['law'] in sel]
 
     if not filtered:
-        st.warning("Geon kaarten voor deze selectie.")
+        st.warning('Geen kaarten voor deze selectie.')
         return
 
-    # Session State (Veilig)
-    if 'card' not in st.session_state or st.session_state.card not in [c['id'] for c in filtered]:
+    # Session State
+    valid_ids = [c['id'] for c in filtered]
+    if 'card' not in st.session_state or st.session_state.card not in valid_ids:
         st.session_state.card_obj = random.choice(filtered)
         st.session_state.card = st.session_state.card_obj['id']
-        st.session_state.back = ""
+        st.session_state.back = st.session_state.card_obj.get('back', '')
 
     c = st.session_state.card_obj
 
@@ -129,25 +220,27 @@ def main():
     if col1.button('Volgende 🎲'):
         st.session_state.card_obj = random.choice(filtered)
         st.session_state.card = st.session_state.card_obj['id']
-        st.session_state.back = ""
+        st.session_state.back = st.session_state.card_obj.get('back', '')
         st.rerun()
-    
+
     if col2.button('Herlaad 🔄'):
         st.session_state.back = extract(c['url'], c['article'])
+        persist(c, st.session_state.back)
         st.rerun()
 
     # Content
     st.divider()
     st.subheader(c['label'])
     st.info(c['front'])
-    st.caption(f"[Link naar wet]({c['url']})")
+    st.caption(f'[Link naar wet]({c["url"]})')
 
     if not st.session_state.back:
-        with st.spinner("Laden..."):
+        with st.spinner('Laden...'):
             st.session_state.back = extract(c['url'], c['article'])
+            persist(c, st.session_state.back)
 
-    with st.expander("Antwoord", expanded=False):
-        st.text_area("Wettekst", st.session_state.back, height=300)
+    with st.expander('Antwoord', expanded=False):
+        st.text_area('Wettekst', st.session_state.back, height=300)
 
 if __name__ == '__main__':
     main()
