@@ -32,26 +32,44 @@ def extract(url, article_num):
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # 1. Probeer fragment ID (meest specifiek)
-        container = soup.find(id=p.fragment) if p.fragment else None
-        
-        # 2. Probeer tekstmatch op "Artikel X"
-        if not container:
+        # 1. Zoek het anker/ID uit de URL fragment
+        container = None
+        if p.fragment:
+            container = soup.find(id=p.fragment)
+
+        # 2. Als ID niet werkt of alleen de kop bevat, zoek via de tekst
+        if not container or len(container.get_text(strip=True)) < 20:
             pattern = re.compile(rf'^Artikel\s+{re.escape(article_num)}\b', re.I)
-            target = soup.find(lambda tag: tag.name in ['h1','h2','h3','div'] and pattern.match(tag.get_text(strip=True)))
+            # Zoek de specifieke kop
+            target = soup.find(lambda tag: tag.name in ['h1','h2','h3','div','span'] and pattern.match(tag.get_text(strip=True)))
+            
             if target:
-                container = target.find_parent('div', class_=re.compile(r'artikel|cl-content')) or target
+                # Probeer de parent-container te pakken die de tekst bevat (vaak class 'cl-content')
+                container = target.find_parent('div', class_=re.compile(r'artikel|cl-content|sectie'))
+                
+                # Als dat niet lukt, pakken we de kop en alle broertjes (siblings) daarna
+                if not container:
+                    content_parts = [target.get_text(strip=True)]
+                    for sibling in target.find_next_siblings():
+                        # Stop als we het volgende artikel tegenkomen
+                        if sibling.name in ['h1','h2','h3'] or "Artikel" in sibling.get_text()[:15]:
+                            break
+                        content_parts.append(sibling.get_text(separator=" ", strip=True))
+                    return "\n".join(content_parts)
 
         if container:
             return extract_clean_text(container)
         
-        # 3. Fallback: Hele tekst doorzoeken
+        # 3. Laatste redding: Regex op de volledige platte tekst van de pagina
         full_text = extract_clean_text(soup)
         match = re.search(rf'(Artikel\s+{re.escape(article_num)}\b.*?)(?=Artikel\s+\d+|$)', full_text, re.S | re.I)
-        return match.group(1).strip() if match else "Artikel tekst niet gevonden op pagina."
-        
+        if match:
+            return match.group(1).strip()
+            
     except Exception as e:
         return f"Fout bij ophalen: {str(e)}"
+
+    return "Artikel tekst niet gevonden op pagina."
 
 def load_cards():
     if not SOURCE_FILE.exists():
