@@ -1,55 +1,135 @@
+import html
+import json
+import random
+import re
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+import requests
+import streamlit as st
+from bs4 import BeautifulSoup
+
+# --- Configuratie ---
+CACHE_FILE = Path(__file__).with_name('flashcards_cache.json')
+SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+
+def extract_clean_text(container):
+    if not container: return ""
+    raw = container.get_text(separator=" ", strip=True)
+    text = html.unescape(raw).replace('\xa0', ' ')
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'(?<!\d)(\d+\.)\s+', r'\n\1 ', text)
+    return text.strip()
+
 def extract(url, article_num):
     try:
-        # Stap 1: Haal de BWB-sleutel en het fragment uit de URL
-        parsed = urlparse(url)
-        fragment = parsed.fragment
+        p = urlparse(url)
+        q = parse_qs(p.query); q['tekst'] = ['1']
+        fetch_url = urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(q, doseq=True), ''))
         
-        # Stap 2: Forceer de 'tekst' weergave en gebruik het fragment als direct doel
-        # We voegen de parameter 'xml' toe indien mogelijk, of 'view=text'
-        params = parse_qs(parsed.query)
-        params['tekst'] = ['1']
-        
-        # Bouw een schone URL voor de request
-        clean_url = urlunparse((
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            parsed.params,
-            urlencode(params, doseq=True),
-            '' # Laat fragment leeg voor de server request
-        ))
-
-        r = requests.get(clean_url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
+        r = requests.get(fetch_url, headers={'User-Agent': USER_AGENT}, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # Stap 3: Zoek gericht naar het ID dat in de URL stond (het fragment)
-        container = None
-        if fragment:
-            # Wetten.overheid gebruikt vaak ID's voor artikelen
-            container = soup.find(id=fragment)
-
-        # Stap 4: Als ID niet werkt, zoek dan naar de kop met het artikelnummer
+        # 1. Probeer fragment ID (meest specifiek)
+        container = soup.find(id=p.fragment) if p.fragment else None
+        
+        # 2. Probeer tekstmatch op "Artikel X"
         if not container:
-            # Zoek een header (h1-h4) of div die begint met "Artikel [nummer]"
-            search_pattern = re.compile(rf'^Artikel\s+{re.escape(article_num)}\b', re.I)
-            target = soup.find(lambda tag: tag.name in ['h1', 'h2', 'h3', 'div', 'span'] and search_pattern.match(tag.get_text(strip=True)))
-            
+            pattern = re.compile(rf'^Artikel\s+{re.escape(article_num)}\b', re.I)
+            target = soup.find(lambda tag: tag.name in ['h1','h2','h3','div'] and pattern.match(tag.get_text(strip=True)))
             if target:
-                # Pak de omhullende div van het artikel (vaak class 'cl-content' of 'artikel')
                 container = target.find_parent('div', class_=re.compile(r'artikel|cl-content')) or target
 
         if container:
             return extract_clean_text(container)
-
-        # Stap 5: Fallback - Regex op de volledige platte tekst
+        
+        # 3. Fallback: Hele tekst doorzoeken
         full_text = extract_clean_text(soup)
-        # Zoek van "Artikel X" tot het volgende artikel of einde
         match = re.search(rf'(Artikel\s+{re.escape(article_num)}\b.*?)(?=Artikel\s+\d+|$)', full_text, re.S | re.I)
-        if match:
-            return match.group(1).strip()
-
+        return match.group(1).strip() if match else "Artikel tekst niet gevonden op pagina."
+        
     except Exception as e:
-        return f"Systeemfout: {str(e)}"
+        return f"Fout bij ophalen: {str(e)}"
 
-    return 'Artikel niet gevonden. Probeer de herlaad knop.'
+def load_cards():
+    if not SOURCE_FILE.exists():
+        return []
+    cards = []
+    try:
+        content = SOURCE_FILE.read_text(encoding='utf-8')
+        for line in content.splitlines():
+            if '→' not in line: continue
+            parts = line.split('→')
+            front_text = parts[0].replace('*', '').strip()
+            
+            link_match = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', parts[1])
+            if not link_match: continue
+            
+            desc, url = link_match.group(1), link_match.group(2)
+            art_match = re.search(r'Artikel\s*:\s*([^\s,]+)', front_text, re.I)
+            article = art_match.group(1) if art_match else ""
+            law = front_text.split('Artikel:')[0].strip().rstrip(',')
+
+            cards.append({
+                'id': f"{law}_{article}_{desc}"[:50],
+                'law': law, 'article': article, 'front': desc, 'url': url,
+                'label': f"{law} - Art. {article}"
+            })
+    except:
+        st.error("Fout bij lezen bronbestand.")
+    return cards
+
+def main():
+    st.set_page_config(page_title="Q4 Flashcards", layout="wide")
+    
+    cards = load_cards()
+    if not cards:
+        st.error(f"Bestand {SOURCE_FILE.name} is leeg of ontbreekt.")
+        return
+
+    # Filter
+    laws = sorted({c['law'] for c in cards})
+    sel = st.sidebar.multiselect('Wetten', ['Alle'] + laws, default=['Alle'])
+    filtered = cards if 'Alle' in sel else [c for c in cards if c['law'] in sel]
+
+    if not filtered:
+        st.warning("Geon kaarten voor deze selectie.")
+        return
+
+    # Session State (Veilig)
+    if 'card' not in st.session_state or st.session_state.card not in [c['id'] for c in filtered]:
+        st.session_state.card_obj = random.choice(filtered)
+        st.session_state.card = st.session_state.card_obj['id']
+        st.session_state.back = ""
+
+    c = st.session_state.card_obj
+
+    # Knoppen
+    col1, col2 = st.columns(2)
+    if col1.button('Volgende 🎲'):
+        st.session_state.card_obj = random.choice(filtered)
+        st.session_state.card = st.session_state.card_obj['id']
+        st.session_state.back = ""
+        st.rerun()
+    
+    if col2.button('Herlaad 🔄'):
+        st.session_state.back = extract(c['url'], c['article'])
+        st.rerun()
+
+    # Content
+    st.divider()
+    st.subheader(c['label'])
+    st.info(c['front'])
+    st.caption(f"[Link naar wet]({c['url']})")
+
+    if not st.session_state.back:
+        with st.spinner("Laden..."):
+            st.session_state.back = extract(c['url'], c['article'])
+
+    with st.expander("Antwoord", expanded=False):
+        st.text_area("Wettekst", st.session_state.back, height=300)
+
+if __name__ == '__main__':
+    main()
