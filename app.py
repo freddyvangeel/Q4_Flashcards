@@ -49,33 +49,50 @@ def tekst_url(url: str) -> str:
 
 def extract(url, article_num):
     try:
-        f_url = tekst_url(url)
-        r = requests.get(f_url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
+        # Stap 1: Converteer de URL naar een directe XML/HTML bronvraag
+        # We voegen 'output=xml' of 'view=text' parameters toe die de overheidssite ondersteunt
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        params['view'] = ['text']  # Forceert tekstweergave
+        
+        # Zoek het BWB-ID en artikel-ID uit de URL
+        # De site accepteert vaak direct requests op het fragment ID
+        fragment = parsed.fragment
+        
+        fetch_url = urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            urlencode(params, doseq=True),
+            ''
+        ))
+
+        r = requests.get(fetch_url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # Strategie 1: Zoek op ID uit fragment
-        fragment = urlparse(url).fragment
+        # Stap 2: Zoek specifiek in de 'main-content' div van de overheidssite
         container = None
         if fragment:
             container = soup.find(id=fragment)
-
-        # Strategie 2: Zoek via Regex in de volledige tekst (omzeilt JS-spring problemen)
+        
         if not container:
-            full_text = extract_clean_text(soup.find('body'))
-            # Zoek vanaf 'Artikel X' tot het volgende artikel of einde tekst
-            pattern = rf'(Artikel\s+{re.escape(article_num)}\b.*?)(?=Artikel\s+\d+|$)'
-            match = re.search(pattern, full_text, re.S | re.I)
-            if match:
-                return match.group(1).strip()
-        else:
+            # Fallback: Zoek naar de div die het artikel bevat via class-names van de site
+            container = soup.find('div', {'class': 'artikel'}) or soup.find('div', {'id': 'content'})
+
+        if container:
             return extract_clean_text(container)
+        
+        # Stap 3: Ultieme fallback - Tekstmatige extractie
+        full_text = extract_clean_text(soup)
+        search_pattern = rf'Artikel\s+{re.escape(article_num)}\b'
+        match = re.search(rf'({search_pattern}.*?)(?=Artikel\s+\d+|$)', full_text, re.S | re.I)
+        
+        return match.group(1).strip() if match else 'Artikel niet gevonden op de pagina.'
 
     except Exception as e:
-        return f"Fout bij ophalen: {str(e)}"
-
-    return 'Artikel niet gevonden op de pagina.'
-
+        return f"Systeemfout bij ophalen: {str(e)}"
 def read_cache():
     if not CACHE_FILE.exists(): return {}
     try: return json.loads(CACHE_FILE.read_text(encoding='utf-8'))
