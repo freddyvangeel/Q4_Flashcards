@@ -31,6 +31,14 @@ NOISE_PHRASES = [
     'Sla het regelingonderdeel op',
 ]
 
+HEADER_PATTERNS = [
+    re.compile(r'^hoofdstuk\b', re.I),
+    re.compile(r'^titeldeel\b', re.I),
+    re.compile(r'^afdeling\b', re.I),
+    re.compile(r'^paragraaf\b', re.I),
+    re.compile(r'^§\s*\d+', re.I),
+]
+
 
 def read_cache_payload():
     if not CACHE_FILE.exists():
@@ -60,6 +68,22 @@ def remove_noise(text: str) -> str:
     return text.strip()
 
 
+def is_header_line(line: str) -> bool:
+    line = normalize_spaces(line)
+    return any(pattern.match(line) for pattern in HEADER_PATTERNS)
+
+
+def is_noise_line(line: str) -> bool:
+    line = normalize_spaces(line)
+    if not line:
+        return True
+    if line in NOISE_PHRASES:
+        return True
+    if line == '...':
+        return True
+    return False
+
+
 def format_article_text(text: str) -> str:
     text = remove_noise(text)
     text = re.sub(r' *\n *', '\n', text)
@@ -81,7 +105,7 @@ def page_lines_from_html(raw_html: str) -> list[str]:
     lines = []
     for line in raw.splitlines():
         line = normalize_spaces(line)
-        if not line or line in NOISE_PHRASES:
+        if is_noise_line(line):
             continue
         lines.append(line)
     return lines
@@ -104,6 +128,10 @@ def extract_article_block_from_lines(lines: list[str], article_num: str) -> str 
         match = re.match(r'^artikel\s+(\d+[a-zA-Z]*)\b', line, re.I)
         if match and match.group(1).strip().lower() != article_key:
             break
+        if is_header_line(line):
+            break
+        if is_noise_line(line):
+            continue
         block.append(line)
 
     text = '\n'.join(block).strip()
