@@ -49,25 +49,43 @@ def tekst_url(url: str) -> str:
 
 def extract(url, article_num):
     try:
-        f_url = tekst_url(url)
-        r = requests.get(f_url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
+        # Stap 1: Haal de pagina op
+        r = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
 
+        # Stap 2: Zoek naar specifieke overheid.nl div-structuren
+        # Artikelen zitten vaak in divs met id 'artikel[nummer]' of 'jci...'
         fragment = urlparse(url).fragment
         container = None
+        
         if fragment:
             container = soup.find(id=fragment)
-
+            
         if not container:
-            search_re = re.compile(rf'Artikel\s+{re.escape(article_num)}', re.I)
-            header = soup.find(['h1', 'h2', 'h3', 'span', 'div'], string=search_re)
-            if header:
-                container = header.find_parent(['div', 'article']) or header
+            # Zoek op 'Artikel X' in koppen of sterke teksten
+            regex = re.compile(rf'Artikel\s+{re.escape(article_num)}\b', re.I)
+            container = soup.find(lambda tag: tag.name in ['h1', 'h2', 'h3', 'div', 'section'] and regex.search(tag.get_text()))
+            
+            if container:
+                # Probeer de bijbehorende content te pakken (meestal de volgende div of parent)
+                parent = container.find_parent('div', class_='cl-content') or container.find_next_sibling('div')
+                if parent:
+                    container = parent
 
-        return extract_clean_text(container) if container else 'Artikel niet gevonden op de pagina.'
+        if container:
+            return extract_clean_text(container)
+            
+        # Stap 3: Ultieme fallback - doorzoek alle tekst op de pagina op patronen
+        all_text = extract_clean_text(soup.find('body'))
+        match = re.search(rf'(Artikel\s+{re.escape(article_num)}.*?)(?=Artikel\s+\d+|$)', all_text, re.S | re.I)
+        if match:
+            return match.group(1).strip()
+
     except Exception as e:
         return f"Fout bij ophalen: {str(e)}"
+
+    return 'Artikel niet gevonden op de pagina.'}"
 
 def read_cache():
     if not CACHE_FILE.exists(): return {}
