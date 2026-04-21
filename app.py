@@ -85,9 +85,22 @@ def is_noise_line(line: str) -> bool:
     return False
 
 
-def is_article_heading_line(line: str) -> bool:
+def normalize_article_number(article_num: str) -> str:
+    return normalize_spaces(article_num).replace('.', ':').lower()
+
+
+def parse_article_heading(line: str):
     line = normalize_spaces(line)
-    return bool(re.match(rf'^artikel\s+{ARTICLE_NUM_PATTERN}\s*$', line, re.I))
+    m = re.match(rf'^artikel\s+({ARTICLE_NUM_PATTERN})(?:\b|\s|$)(.*)$', line, re.I)
+    if not m:
+        return None
+    num = normalize_article_number(m.group(1))
+    rest = normalize_spaces(m.group(2))
+    return num, rest
+
+
+def is_article_heading_line(line: str) -> bool:
+    return parse_article_heading(line) is not None
 
 
 def format_article_text(text: str) -> str:
@@ -118,22 +131,28 @@ def page_lines_from_html(raw_html: str) -> list[str]:
 
 
 def extract_article_block_from_lines(lines: list[str], article_num: str) -> list[str] | None:
-    article_key = article_num.strip().lower()
+    article_key = normalize_article_number(article_num)
     start_index = None
+    start_match = None
 
     for i, line in enumerate(lines):
-        if re.match(rf'^artikel\s+{re.escape(article_num)}(?:\b|\s|\.|\(|\[|$)', line, re.I):
+        parsed = parse_article_heading(line)
+        if parsed and parsed[0] == article_key:
             start_index = i
+            start_match = parsed
             break
 
     if start_index is None:
         return None
 
-    block = [lines[start_index]]
+    block = [f'Artikel {article_num}']
+    if start_match and start_match[1]:
+        block.append(start_match[1])
+
     for line in lines[start_index + 1:]:
         if is_article_heading_line(line):
-            next_article = re.match(rf'^artikel\s+({ARTICLE_NUM_PATTERN})\s*$', line, re.I)
-            if next_article and next_article.group(1).strip().lower() != article_key:
+            next_article = parse_article_heading(line)
+            if next_article and next_article[0] != article_key:
                 break
         if is_header_line(line):
             break
