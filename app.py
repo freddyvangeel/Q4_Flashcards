@@ -286,7 +286,14 @@ def extract_lid_and_onderdelen(block_lines, wanted_lid, wanted_onderdelen, wante
 
     if not wanted_lid:
         if wanted_subs:
-            return extract_subs_from_lines(block_lines, wanted_subs)
+            article_header = []
+            body_lines = block_lines
+            if block_lines and parse_article(block_lines[0]):
+                article_header = [block_lines[0]]
+                body_lines = block_lines[1:]
+            sub_result = extract_subs_from_lines(body_lines, wanted_subs)
+            if sub_result != '\n'.join(body_lines):
+                return '\n'.join(article_header + [sub_result]) if article_header else sub_result
         return '\n'.join(block_lines)
 
     lid_lines = []
@@ -306,7 +313,11 @@ def extract_lid_and_onderdelen(block_lines, wanted_lid, wanted_onderdelen, wante
 
     if lid_lines:
         if wanted_subs:
-            return extract_subs_from_lines(lid_lines[1:] if len(lid_lines) > 1 else lid_lines, wanted_subs)
+            body_lines = lid_lines[1:] if len(lid_lines) > 1 else []
+            result = extract_subs_from_lines(body_lines, wanted_subs)
+            if result != '\n'.join(body_lines):
+                return '\n'.join([lid_lines[0], result]) if lid_lines[0] else result
+            return '\n'.join(lid_lines)
         if wanted_onderdelen:
             return extract_onderdelen_from_lid_lines(lid_lines, wanted_onderdelen)
         return '\n'.join(lid_lines)
@@ -440,9 +451,10 @@ def extract_lid_from_tag_structure(article_container, wanted_lid, wanted_onderde
 
         if collected:
             if wanted_subs:
-                result = extract_subs_from_lines(collected[1:] if len(collected) > 1 else collected, wanted_subs)
-                if result:
-                    return result
+                body_lines = collected[1:] if len(collected) > 1 else []
+                result = extract_subs_from_lines(body_lines, wanted_subs)
+                if result != '\n'.join(body_lines):
+                    return '\n'.join([collected[0], result]) if collected[0] else result
             result = extract_onderdelen_from_lid_lines(collected, wanted_onderdelen)
             if result:
                 return result
@@ -541,8 +553,8 @@ def segment_score(segment, article, source_text=''):
         current_last = current_canonical.split('.')[-1]
         if current_canonical == target_canonical:
             score += 100
-        elif current_last == target_last:
-            score += 40
+        elif current_last == target_last and '.' not in target_canonical:
+            score += 10
 
     if header.lower().startswith('artikel '):
         score += 10
@@ -569,20 +581,14 @@ def extract_article_from_segments(lines, article, source_text=''):
     exact = [segment for segment in segments if segment_matches_article(segment, article)]
     if exact:
         return max(exact, key=lambda seg: segment_score(seg, article, source_text))
-
-    scored = []
-    for segment in segments:
-        score = segment_score(segment, article, source_text)
-        if score > 0:
-            scored.append((score, segment))
-    if scored:
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return scored[0][1]
     return None
 
 
 def extract_article_by_number_fallback(lines, article, source_text=''):
     target_canonical = canonical_article_id(article)
+    if '.' in target_canonical:
+        return None
+
     target_digits = target_canonical.split('.')[-1]
     candidates = []
 
@@ -750,6 +756,8 @@ def extract(url, article, source_text):
                     paragraaf_lines.append(line)
             if paragraaf_lines:
                 exact_block = extract_article_from_segments(paragraaf_lines, effective_article, source_text) or extract_article_block_from_page_lines(paragraaf_lines, effective_article)
+                if not exact_block:
+                    exact_block = extract_article_by_number_fallback(paragraaf_lines, effective_article, source_text)
                 if exact_block:
                     lid_match = LID_RE.search(source_text or '')
                     lid = lid_match.group(1) if lid_match else None
