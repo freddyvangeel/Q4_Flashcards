@@ -235,6 +235,33 @@ def extract_text_from_container_until_next_article(container, article):
     return block or lines
 
 
+def find_article_start_index(lines, article):
+    for idx, line in enumerate(lines):
+        parsed = parse_article(line)
+        if parsed and article_matches(parsed[0], article):
+            return idx
+    return None
+
+
+def extract_article_block_from_page_lines(lines, article):
+    start_idx = find_article_start_index(lines, article)
+    if start_idx is None:
+        return None
+
+    block = []
+    for idx in range(start_idx, len(lines)):
+        line = lines[idx]
+        if idx > start_idx:
+            parsed = parse_article(line)
+            if parsed and not article_matches(parsed[0], article):
+                break
+            if re.match(r'^(Titel|Afdeling|Hoofdstuk|Paragraaf)\b', line, re.I):
+                break
+        block.append(line)
+
+    return block or None
+
+
 def extract_lid_from_plain_lines(lines, wanted_lid, wanted_onderdelen):
     if not lines:
         return ''
@@ -304,7 +331,8 @@ def extract_structured_article_text(soup, article, source_text):
 
     plain_lines = extract_text_from_container_until_next_article(article_container, article)
     if plain_lines:
-        result = extract_lid_from_plain_lines(plain_lines, wanted_lid, wanted_onderdelen)
+        exact_block = extract_article_block_from_page_lines(plain_lines, article) or plain_lines
+        result = extract_lid_from_plain_lines(exact_block, wanted_lid, wanted_onderdelen)
         if result:
             return result
 
@@ -321,8 +349,14 @@ def extract(url, article, source_text):
             return structured
 
         lines = page_lines(response.text)
-        block = extract_article(lines, article)
+        exact_block = extract_article_block_from_page_lines(lines, article)
+        if exact_block:
+            lid_match = LID_RE.search(source_text or '')
+            lid = lid_match.group(1) if lid_match else None
+            onderdelen = extract_requested_onderdelen(source_text)
+            return extract_lid_and_onderdelen(exact_block, lid, onderdelen)
 
+        block = extract_article(lines, article)
         if block:
             lid_match = LID_RE.search(source_text or '')
             lid = lid_match.group(1) if lid_match else None
