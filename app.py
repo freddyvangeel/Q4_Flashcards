@@ -291,7 +291,7 @@ def extract_article_block_from_page_lines(lines, article):
             parsed = parse_article(line)
             if parsed and not article_matches(parsed[0], article):
                 break
-            if re.match(r'^(Titel|Afdeling|Hoofdstuk|Paragraaf)\b', line, re.I):
+            if re.match(r'^(Titel|Afdeling|Hoofdstuk|Paragraaf|Boek|Deel|Titeldeel|Bijlage)\b', line, re.I):
                 break
         block.append(line)
 
@@ -438,7 +438,7 @@ def extract_article_by_number_fallback(lines, article):
         current_digits = current_canonical.split('.')[-1]
         if current_canonical == target_canonical:
             return segment
-        if current_digits == target_digits:
+        if current_digits == target_digits and '.' not in target_canonical and '.' not in current_canonical:
             return segment
     return None
 
@@ -466,7 +466,7 @@ def extract_article_by_id_attributes(soup, article, source_text):
             candidates.append(tag)
         elif normalized_target and normalized_target in attrs_norm:
             candidates.append(tag)
-        elif article_digits and re.search(rf'(^|[^0-9]){re.escape(article_digits)}([^0-9]|$)', attrs_norm):
+        elif article_digits and '.' not in canonical_target and re.search(rf'(^|[^0-9]){re.escape(article_digits)}([^0-9]|$)', attrs_norm):
             candidates.append(tag)
 
     for tag in candidates:
