@@ -14,7 +14,7 @@ SOURCE_FILE = Path(__file__).with_name('Juridisch kader Q1 tm Q5.md')
 USER_AGENT = 'Mozilla/5.0'
 REQUEST_TIMEOUT = 20
 
-ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+)', re.I)
+ARTICLE_RE = re.compile(r'\bArtikel\s*:?\s*([^\n]+?)(?=(?:\s+Lid\s*:?\s*|\s*→|$))', re.I)
 LID_RE = re.compile(r'\bLid\s*:?\s*(\d+)', re.I)
 
 NOISE = [
@@ -23,34 +23,33 @@ NOISE = [
     'Sla het regelingonderdeel op','...'
 ]
 
-
 def normalize(t):
     return re.sub(r'\s+', ' ', html.unescape(t or '').replace('\xa0',' ')).strip()
-
 
 def article_matches(a, b):
     a = normalize(a).lower().replace('.', ':')
     b = normalize(b).lower().replace('.', ':')
     return a == b
 
-
 def parse_article(line):
-    m = re.match(r'^artikel\s+([\d:.a-zA-Z]+)(.*)$', line, re.I)
+    line = normalize(line)
+    m = re.search(r'\bartikel\s+([\d:.a-zA-Z]+)\b', line, re.I)
     if not m:
         return None
-    return m.group(1), normalize(m.group(2))
+    return m.group(1), normalize(line[m.end():])
 
+def is_new_article_heading(line):
+    return bool(re.fullmatch(r'Artikel\s+[\d:.a-zA-Z]+.*', normalize(line), re.I))
 
 def page_lines(txt):
     soup = BeautifulSoup(txt, 'html.parser')
-    root = soup.select_one('#content') or soup.body
+    root = soup.select_one('#content') or soup.body or soup
     out = []
     for l in root.get_text('\n').splitlines():
         l = normalize(l)
         if l and l not in NOISE:
             out.append(l)
     return out
-
 
 def extract_article(lines, wanted):
     block = []
@@ -69,13 +68,22 @@ def extract_article(lines, wanted):
         if not started:
             continue
 
-        if parsed and not article_matches(parsed[0], wanted):
-            break
+        if is_new_article_heading(line):
+            parsed_next = parse_article(line)
+            if parsed_next and not article_matches(parsed_next[0], wanted):
+                break
 
         block.append(line)
 
-    return block if len(block) > 2 else None
+    if block:
+        return block
 
+    # fallback voor afwijkende HTML
+    for i, line in enumerate(lines):
+        if article_matches(line, wanted):
+            return [f'Artikel {wanted}'] + lines[i+1:i+10]
+
+    return None
 
 def extract_lid(block_lines, wanted_lid):
     if not block_lines or not wanted_lid:
@@ -85,12 +93,12 @@ def extract_lid(block_lines, wanted_lid):
     capture = False
 
     for line in block_lines:
-        if re.match(rf'^{wanted_lid}\b', line):
+        if re.match(rf'^{wanted_lid}[.:)]?\b', line):
             capture = True
             lid_lines.append(line)
             continue
 
-        if capture and re.match(r'^\d+\b', line):
+        if capture and re.match(r'^\d+[.:)]?\b', line):
             break
 
         if capture:
@@ -98,38 +106,42 @@ def extract_lid(block_lines, wanted_lid):
 
     return '\n'.join(lid_lines) if lid_lines else '\n'.join(block_lines)
 
-
-def extract(url, article, front_text):
+def extract(url, article, source_text):
     try:
         r = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
         lines = page_lines(r.text)
         block = extract_article(lines, article)
 
         if block:
-            lid_match = LID_RE.search(front_text or '')
+            lid_match = LID_RE.search(source_text or '')
             lid = lid_match.group(1) if lid_match else None
             return extract_lid(block, lid)
 
     except:
         pass
-    return 'Artikel tekst niet gevonden op pagina.'
 
+    return 'Artikel tekst niet gevonden op pagina.'
 
 def load_cards():
     cards = []
     for line in SOURCE_FILE.read_text(encoding='utf-8').splitlines():
         if '→' not in line:
             continue
-        m = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', line)
-        art = ARTICLE_RE.search(line)
-        if m and art:
+
+        left, right = line.split('→', 1)
+        source_text = normalize(left.replace('*', ''))
+
+        link = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', right)
+        art = ARTICLE_RE.search(source_text)
+
+        if link and art:
             cards.append({
-                'front': m.group(1),
-                'url': m.group(2),
-                'article': art.group(1).strip()
+                'front': normalize(link.group(1)),
+                'url': link.group(2),
+                'article': normalize(art.group(1)),
+                'source_text': source_text
             })
     return cards
-
 
 def main():
     st.set_page_config(page_title='Q4 Flashcards', layout='wide')
@@ -148,10 +160,9 @@ def main():
         st.session_state.back = ''
 
     if not st.session_state.back:
-        st.session_state.back = extract(c['url'], c['article'], c['front'])
+        st.session_state.back = extract(c['url'], c['article'], c['source_text'])
 
     st.text_area('Wettekst', st.session_state.back, height=300)
-
 
 if __name__ == '__main__':
     main()
