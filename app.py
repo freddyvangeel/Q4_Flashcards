@@ -36,8 +36,16 @@ def normalize_article_id(value):
     return value
 
 
+def canonical_article_id(value):
+    value = normalize_article_id(value)
+    match = re.search(r'(\d+(?:\.\d+)*[a-z]?)$', value)
+    if match:
+        return match.group(1)
+    return value
+
+
 def article_matches(a, b):
-    return normalize_article_id(a) == normalize_article_id(b)
+    return canonical_article_id(a) == canonical_article_id(b)
 
 
 def article_number_from_line(line):
@@ -226,13 +234,17 @@ def extract_lid_and_onderdelen(block_lines, wanted_lid, wanted_onderdelen):
 
 def find_article_header_in_soup(soup, article):
     normalized_wanted = normalize_article_id(article)
+    canonical_wanted = canonical_article_id(article)
     for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'div', 'span', 'p']):
         text = normalize(tag.get_text(' ', strip=True))
         parsed = parse_article(text)
         if parsed and article_matches(parsed[0], article):
             return tag
-        if normalized_wanted and normalized_wanted in normalize_article_id(text) and text.lower().startswith('artikel'):
-            return tag
+        if text.lower().startswith('artikel'):
+            if canonical_wanted and canonical_article_id(text) == canonical_wanted:
+                return tag
+            if normalized_wanted and normalized_wanted in normalize_article_id(text):
+                return tag
     return None
 
 
@@ -415,16 +427,18 @@ def extract_article_from_segments(lines, article):
 
 
 def extract_article_by_number_fallback(lines, article):
-    normalized_target = normalize_article_id(article)
-    article_digits = normalized_target.split('.')[-1]
+    target_canonical = canonical_article_id(article)
+    target_digits = target_canonical.split('.')[-1]
 
     for segment in split_into_article_segments(lines):
         parsed = parse_article(segment[0])
         if not parsed:
             continue
-        current_normalized = normalize_article_id(parsed[0])
-        current_digits = current_normalized.split('.')[-1]
-        if current_digits == article_digits:
+        current_canonical = canonical_article_id(parsed[0])
+        current_digits = current_canonical.split('.')[-1]
+        if current_canonical == target_canonical:
+            return segment
+        if current_digits == target_digits:
             return segment
     return None
 
@@ -434,7 +448,8 @@ def extract_article_by_id_attributes(soup, article, source_text):
     wanted_lid = wanted_lid_match.group(1) if wanted_lid_match else None
     wanted_onderdelen = extract_requested_onderdelen(source_text)
     normalized_target = normalize_article_id(article)
-    article_digits = normalized_target.split('.')[-1]
+    canonical_target = canonical_article_id(article)
+    article_digits = canonical_target.split('.')[-1]
 
     candidates = []
     for tag in soup.find_all(True):
@@ -446,7 +461,10 @@ def extract_article_by_id_attributes(soup, article, source_text):
             str(tag.get('name', '')),
         ])
         attrs_norm = normalize_article_id(attrs)
-        if normalized_target and normalized_target in attrs_norm:
+        attrs_canonical = canonical_article_id(attrs)
+        if canonical_target and attrs_canonical == canonical_target:
+            candidates.append(tag)
+        elif normalized_target and normalized_target in attrs_norm:
             candidates.append(tag)
         elif article_digits and re.search(rf'(^|[^0-9]){re.escape(article_digits)}([^0-9]|$)', attrs_norm):
             candidates.append(tag)
