@@ -130,6 +130,7 @@ def load_cards():
 
         left, right = line.split('→', 1)
         source_text = normalize(left.replace('*', ''))
+        description = source_text
 
         link = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', right)
         art = ARTICLE_RE.search(source_text)
@@ -137,6 +138,7 @@ def load_cards():
         if link and art:
             cards.append({
                 'front': normalize(link.group(1)),
+                'title': description,
                 'url': link.group(2),
                 'article': normalize(art.group(1)),
                 'source_text': source_text
@@ -163,7 +165,7 @@ def main():
 
     c = st.session_state.card
 
-    st.subheader(c['front'])
+    st.subheader(c['title'])
     st.info(c['front'])
     st.markdown(f"[Open wet]({c['url']})")
 
