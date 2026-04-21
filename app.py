@@ -313,6 +313,51 @@ def extract_lid_from_tag_structure(article_container, wanted_lid, wanted_onderde
     return ''
 
 
+def extract_lid_via_flattened_block(block_lines, wanted_lid, wanted_onderdelen):
+    if not wanted_lid or not block_lines:
+        return ''
+
+    joined = '\n'.join(block_lines)
+    joined = re.sub(r'(?<!\n)(\b\d+[a-zA-Z]?[.)]?\b)', r'\n\1', joined)
+    joined = re.sub(r'(?<!\n)(\b[a-z]\.)', r'\n\1', joined)
+    normalized_lines = [normalize(x) for x in joined.splitlines() if normalize(x)]
+
+    result = extract_lid_and_onderdelen(normalized_lines, wanted_lid, wanted_onderdelen)
+    if result and result != '\n'.join(normalized_lines):
+        return result
+    return ''
+
+
+def extract_article_via_anchor_links(soup, article, source_text):
+    wanted_lid_match = LID_RE.search(source_text or '')
+    wanted_lid = wanted_lid_match.group(1) if wanted_lid_match else None
+    wanted_onderdelen = extract_requested_onderdelen(source_text)
+
+    for anchor in soup.find_all('a'):
+        anchor_text = normalize(anchor.get_text(' ', strip=True))
+        parsed = parse_article(anchor_text)
+        if not parsed or not article_matches(parsed[0], article):
+            continue
+
+        container = nearest_article_container(anchor)
+        block_lines = extract_text_from_container_until_next_article(container, article)
+        exact_block = extract_article_block_from_page_lines(block_lines, article) or block_lines
+
+        if wanted_lid:
+            result = extract_lid_and_onderdelen(exact_block, wanted_lid, wanted_onderdelen)
+            if result and result != '\n'.join(exact_block):
+                return result
+
+            result = extract_lid_via_flattened_block(exact_block, wanted_lid, wanted_onderdelen)
+            if result:
+                return result
+
+        elif exact_block:
+            return '\n'.join(exact_block)
+
+    return ''
+
+
 def extract_structured_article_text(soup, article, source_text):
     wanted_lid_match = LID_RE.search(source_text or '')
     wanted_lid = wanted_lid_match.group(1) if wanted_lid_match else None
@@ -320,6 +365,9 @@ def extract_structured_article_text(soup, article, source_text):
 
     article_header = find_article_header_in_soup(soup, article)
     if not article_header:
+        anchor_result = extract_article_via_anchor_links(soup, article, source_text)
+        if anchor_result:
+            return anchor_result
         return ''
 
     article_container = nearest_article_container(article_header)
@@ -333,8 +381,17 @@ def extract_structured_article_text(soup, article, source_text):
     if plain_lines:
         exact_block = extract_article_block_from_page_lines(plain_lines, article) or plain_lines
         result = extract_lid_from_plain_lines(exact_block, wanted_lid, wanted_onderdelen)
-        if result:
+        if result and (not wanted_lid or result != '\n'.join(exact_block)):
             return result
+
+        if wanted_lid:
+            result = extract_lid_via_flattened_block(exact_block, wanted_lid, wanted_onderdelen)
+            if result:
+                return result
+
+    anchor_result = extract_article_via_anchor_links(soup, article, source_text)
+    if anchor_result:
+        return anchor_result
 
     return ''
 
@@ -354,14 +411,28 @@ def extract(url, article, source_text):
             lid_match = LID_RE.search(source_text or '')
             lid = lid_match.group(1) if lid_match else None
             onderdelen = extract_requested_onderdelen(source_text)
-            return extract_lid_and_onderdelen(exact_block, lid, onderdelen)
+            result = extract_lid_and_onderdelen(exact_block, lid, onderdelen)
+            if result and (not lid or result != '\n'.join(exact_block)):
+                return result
+            if lid:
+                flattened = extract_lid_via_flattened_block(exact_block, lid, onderdelen)
+                if flattened:
+                    return flattened
+            return result
 
         block = extract_article(lines, article)
         if block:
             lid_match = LID_RE.search(source_text or '')
             lid = lid_match.group(1) if lid_match else None
             onderdelen = extract_requested_onderdelen(source_text)
-            return extract_lid_and_onderdelen(block, lid, onderdelen)
+            result = extract_lid_and_onderdelen(block, lid, onderdelen)
+            if result and (not lid or result != '\n'.join(block)):
+                return result
+            if lid:
+                flattened = extract_lid_via_flattened_block(block, lid, onderdelen)
+                if flattened:
+                    return flattened
+            return result
 
     except Exception:
         pass
