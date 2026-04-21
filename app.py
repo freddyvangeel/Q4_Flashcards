@@ -31,15 +31,18 @@ def article_matches(a, b):
     b = normalize(b).lower().replace('.', ':')
     return a == b
 
+# FIX 1: alleen echte artikelkoppen (begin regel)
 def parse_article(line):
     line = normalize(line)
-    m = re.search(r'\bartikel\s+([\d:.a-zA-Z]+)\b', line, re.I)
+    m = re.match(r'^Artikel\s+([\d:.a-zA-Z]+)\b', line)
     if not m:
         return None
     return m.group(1), normalize(line[m.end():])
 
+# FIX 2: alleen echte headings, geen inline verwijzingen
 def is_new_article_heading(line):
-    return bool(re.fullmatch(r'Artikel\s+[\d:.a-zA-Z]+.*', normalize(line), re.I))
+    line = normalize(line)
+    return bool(re.match(r'^Artikel\s+[\d:.a-zA-Z]+\b', line))
 
 def page_lines(txt):
     soup = BeautifulSoup(txt, 'html.parser')
@@ -68,9 +71,10 @@ def extract_article(lines, wanted):
         if not started:
             continue
 
+        # stop alleen bij echte nieuwe kop
         if is_new_article_heading(line):
-            parsed_next = parse_article(line)
-            if parsed_next and not article_matches(parsed_next[0], wanted):
+            next_parsed = parse_article(line)
+            if next_parsed and not article_matches(next_parsed[0], wanted):
                 break
 
         block.append(line)
@@ -78,9 +82,9 @@ def extract_article(lines, wanted):
     if block:
         return block
 
-    # fallback voor afwijkende HTML
+    # FIX 3: strengere fallback (alleen echte kop)
     for i, line in enumerate(lines):
-        if article_matches(line, wanted):
+        if re.match(rf'^Artikel\s+{re.escape(wanted)}\b', line):
             return [f'Artikel {wanted}'] + lines[i+1:i+10]
 
     return None
