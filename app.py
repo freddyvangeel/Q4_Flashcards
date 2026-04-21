@@ -172,7 +172,8 @@ def main():
     if not st.session_state.back:
         st.session_state.back = extract(c['url'], c['article'], c['source_text'])
 
-    st.text_area('Wettekst', st.session_state.back, height=300)
+    with st.expander('Antwoord', expanded=False):
+        st.text_area('Wettekst', st.session_state.back, height=300)
 
 if __name__ == '__main__':
     main()
