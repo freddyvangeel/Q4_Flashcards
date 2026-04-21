@@ -25,6 +25,8 @@ NOISE = [
     '...'
 ]
 
+SECTION_STOP_RE = re.compile(r'^(Titel|Afdeling|Hoofdstuk|Paragraaf|Boek|Deel|Titeldeel|Bijlage|§)\b', re.I)
+
 
 def normalize(text):
     return re.sub(r'\s+', ' ', html.unescape(text or '').replace('\xa0', ' ')).strip()
@@ -77,6 +79,10 @@ def is_new_article_heading(line):
     return bool(re.match(r'^Artikel\s+[\d]+[\d:.a-zA-Z]*\b', line, re.I))
 
 
+def is_section_heading(line):
+    return bool(SECTION_STOP_RE.match(normalize(line)))
+
+
 def page_lines(text):
     soup = BeautifulSoup(text, 'html.parser')
     root = soup.select_one('#content') or soup.body or soup
@@ -110,6 +116,9 @@ def extract_article(lines, wanted):
             if next_parsed and not article_matches(next_parsed[0], wanted):
                 break
 
+        if is_section_heading(line):
+            break
+
         block.append(line)
 
     if block:
@@ -124,6 +133,8 @@ def extract_article(lines, wanted):
                     next_parsed = parse_article(follow)
                     if next_parsed and not article_matches(next_parsed[0], wanted):
                         break
+                if fallback and is_section_heading(follow):
+                    break
                 fallback.append(follow)
             return fallback or None
 
@@ -291,7 +302,7 @@ def extract_article_block_from_page_lines(lines, article):
             parsed = parse_article(line)
             if parsed and not article_matches(parsed[0], article):
                 break
-            if re.match(r'^(Titel|Afdeling|Hoofdstuk|Paragraaf|Boek|Deel|Titeldeel|Bijlage)\b', line, re.I):
+            if is_section_heading(line):
                 break
         block.append(line)
 
@@ -333,6 +344,9 @@ def extract_lid_from_tag_structure(article_container, wanted_lid, wanted_onderde
                 continue
 
             if line_starts_new_lid(sibling_text):
+                break
+
+            if is_section_heading(sibling_text):
                 break
 
             parsed = parse_article(sibling_text)
@@ -404,7 +418,11 @@ def split_into_article_segments(lines):
                 segments.append(current)
             current = [line]
         elif current:
-            current.append(line)
+            if is_section_heading(line):
+                segments.append(current)
+                current = []
+            else:
+                current.append(line)
 
     if current:
         segments.append(current)
@@ -419,16 +437,58 @@ def segment_matches_article(segment, article):
     return bool(parsed and article_matches(parsed[0], article))
 
 
-def extract_article_from_segments(lines, article):
-    for segment in split_into_article_segments(lines):
-        if segment_matches_article(segment, article):
-            return segment
+def segment_score(segment, article, source_text=''):
+    if not segment:
+        return -10
+
+    score = 0
+    header = normalize(segment[0])
+    parsed = parse_article(header)
+    target_canonical = canonical_article_id(article)
+    target_last = target_canonical.split('.')[-1]
+
+    if parsed:
+        current_canonical = canonical_article_id(parsed[0])
+        current_last = current_canonical.split('.')[-1]
+        if current_canonical == target_canonical:
+            score += 100
+        elif current_last == target_last:
+            score += 40
+
+    if header.lower().startswith('artikel '):
+        score += 10
+
+    source_lid_match = LID_RE.search(source_text or '')
+    if source_lid_match:
+        wanted_lid = source_lid_match.group(1)
+        joined = '\n'.join(segment[:8])
+        if re.search(rf'(^|\n){re.escape(wanted_lid)}[.:)]?\b', joined, re.I):
+            score += 20
+
+    return score
+
+
+def extract_article_from_segments(lines, article, source_text=''):
+    segments = split_into_article_segments(lines)
+    exact = [segment for segment in segments if segment_matches_article(segment, article)]
+    if exact:
+        return max(exact, key=lambda seg: segment_score(seg, article, source_text))
+
+    scored = []
+    for segment in segments:
+        score = segment_score(segment, article, source_text)
+        if score > 0:
+            scored.append((score, segment))
+    if scored:
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1]
     return None
 
 
-def extract_article_by_number_fallback(lines, article):
+def extract_article_by_number_fallback(lines, article, source_text=''):
     target_canonical = canonical_article_id(article)
     target_digits = target_canonical.split('.')[-1]
+    candidates = []
 
     for segment in split_into_article_segments(lines):
         parsed = parse_article(segment[0])
@@ -437,9 +497,12 @@ def extract_article_by_number_fallback(lines, article):
         current_canonical = canonical_article_id(parsed[0])
         current_digits = current_canonical.split('.')[-1]
         if current_canonical == target_canonical:
-            return segment
-        if current_digits == target_digits and '.' not in target_canonical and '.' not in current_canonical:
-            return segment
+            candidates.append(segment)
+        elif current_digits == target_digits:
+            candidates.append(segment)
+
+    if candidates:
+        return max(candidates, key=lambda seg: segment_score(seg, article, source_text))
     return None
 
 
@@ -472,9 +535,9 @@ def extract_article_by_id_attributes(soup, article, source_text):
     for tag in candidates:
         container = nearest_article_container(tag)
         lines = extract_text_from_container_until_next_article(container, article)
-        exact_block = extract_article_from_segments(lines, article) or extract_article_block_from_page_lines(lines, article)
+        exact_block = extract_article_from_segments(lines, article, source_text) or extract_article_block_from_page_lines(lines, article)
         if not exact_block:
-            exact_block = extract_article_by_number_fallback(lines, article)
+            exact_block = extract_article_by_number_fallback(lines, article, source_text)
         if not exact_block:
             continue
 
@@ -515,7 +578,7 @@ def extract_structured_article_text(soup, article, source_text):
 
     plain_lines = extract_text_from_container_until_next_article(article_container, article)
     if plain_lines:
-        exact_block = extract_article_from_segments(plain_lines, article) or extract_article_block_from_page_lines(plain_lines, article) or plain_lines
+        exact_block = extract_article_from_segments(plain_lines, article, source_text) or extract_article_block_from_page_lines(plain_lines, article) or plain_lines
         result = extract_lid_from_plain_lines(exact_block, wanted_lid, wanted_onderdelen)
         if result and (not wanted_lid or result != '\n'.join(exact_block)):
             return result
@@ -548,9 +611,9 @@ def extract(url, article, source_text):
             return structured
 
         lines = page_lines(response.text)
-        exact_block = extract_article_from_segments(lines, article) or extract_article_block_from_page_lines(lines, article)
+        exact_block = extract_article_from_segments(lines, article, source_text) or extract_article_block_from_page_lines(lines, article)
         if not exact_block:
-            exact_block = extract_article_by_number_fallback(lines, article)
+            exact_block = extract_article_by_number_fallback(lines, article, source_text)
         if exact_block:
             lid_match = LID_RE.search(source_text or '')
             lid = lid_match.group(1) if lid_match else None
