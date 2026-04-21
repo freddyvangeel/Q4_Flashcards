@@ -15,7 +15,7 @@ USER_AGENT = 'Mozilla/5.0'
 REQUEST_TIMEOUT = 20
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:?\s*([^\n]+?)(?=(?:\s+Lid\s*:?\s*|\s*→|$))', re.I)
-LID_RE = re.compile(r'\bLid\s*:?\s*(\d+)', re.I)
+LID_RE = re.compile(r'\bLid\s*:?\s*([\dA-Za-z]+)', re.I)
 ONDER_RE = re.compile(r'\bonder\s+([A-Za-z0-9,\s]+)', re.I)
 
 NOISE = [
@@ -27,10 +27,13 @@ NOISE = [
 def normalize(t):
     return re.sub(r'\s+', ' ', html.unescape(t or '').replace('\xa0',' ')).strip()
 
+def normalize_article_id(value):
+    value = normalize(value).lower()
+    value = value.replace(':', '.').replace(' ', '')
+    return value
+
 def article_matches(a, b):
-    a = normalize(a).lower().replace('.', ':')
-    b = normalize(b).lower().replace('.', ':')
-    return a == b
+    return normalize_article_id(a) == normalize_article_id(b)
 
 def parse_article(line):
     line = normalize(line)
@@ -101,11 +104,12 @@ def extract_requested_onderdelen(source_text):
 
 def line_starts_lid(line, wanted_lid):
     line = normalize(line)
-    return bool(re.match(rf'^{re.escape(str(wanted_lid))}[.:)]?\b', line))
+    wanted_lid = normalize(str(wanted_lid))
+    return bool(re.match(rf'^{re.escape(wanted_lid)}[.:)]?\b', line, re.I))
 
 def line_starts_new_lid(line):
     line = normalize(line)
-    return bool(re.match(r'^\d+[.:)]?\b', line))
+    return bool(re.match(r'^\d+[A-Za-z]?[.:)]?\b', line))
 
 def line_starts_letter(line):
     line = normalize(line)
@@ -116,36 +120,44 @@ def line_starts_subnumber(line):
     line = normalize(line)
     return bool(re.match(r'^\d+[°o]?[.:)]?\b', line))
 
+def collect_letter_chunks(lines):
+    chunks = []
+    current_letter = None
+    current_chunk = []
+
+    for line in lines:
+        letter = line_starts_letter(line)
+        if letter:
+            if current_letter and current_chunk:
+                chunks.append((current_letter, current_chunk))
+            current_letter = letter
+            current_chunk = [line]
+        elif current_letter:
+            current_chunk.append(line)
+
+    if current_letter and current_chunk:
+        chunks.append((current_letter, current_chunk))
+
+    return chunks
+
 def extract_onderdelen_from_lid_lines(lid_lines, wanted_onderdelen):
     if not wanted_onderdelen:
         return '\n'.join(lid_lines)
 
     wanted_onderdelen = [o.lower() for o in wanted_onderdelen]
-    result = []
-    current_letter = None
-    current_chunk = []
-    collected_any = False
+    letter_chunks = collect_letter_chunks(lid_lines[1:])
 
-    def flush_chunk():
-        nonlocal current_letter, current_chunk, collected_any, result
-        if current_letter and current_chunk and current_letter.lower() in wanted_onderdelen:
-            result.extend(current_chunk)
-            collected_any = True
-        current_chunk = []
+    if letter_chunks:
+        result = [lid_lines[0]]
+        matched = False
+        for letter, chunk in letter_chunks:
+            if letter in wanted_onderdelen:
+                result.extend(chunk)
+                matched = True
+        if matched:
+            return '\n'.join(result)
 
-    for line in lid_lines[1:]:
-        letter = line_starts_letter(line)
-        if letter:
-            flush_chunk()
-            current_letter = letter
-            current_chunk = [line]
-        elif current_letter:
-            current_chunk.append(line)
-        elif not collected_any:
-            result.append(line)
-
-    flush_chunk()
-    return '\n'.join(result) if result else '\n'.join(lid_lines)
+    return '\n'.join(lid_lines)
 
 def extract_lid_and_onderdelen(block_lines, wanted_lid, wanted_onderdelen):
     if not block_lines:
@@ -176,50 +188,86 @@ def extract_lid_and_onderdelen(block_lines, wanted_lid, wanted_onderdelen):
 
     return '\n'.join(block_lines)
 
+def find_article_header_in_soup(soup, article):
+    normalized_wanted = normalize_article_id(article)
+    for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'div', 'span', 'p']):
+        text = normalize(tag.get_text(' ', strip=True))
+        parsed = parse_article(text)
+        if parsed and article_matches(parsed[0], article):
+            return tag
+        if normalized_wanted and normalized_wanted in normalize_article_id(text) and text.lower().startswith('artikel'):
+            return tag
+    return None
+
+def nearest_article_container(tag):
+    current = tag
+    while current:
+        if getattr(current, 'name', None) in ['article', 'section']:
+            return current
+        current = current.parent
+    return tag.parent if tag else None
+
+def extract_text_from_container_until_next_article(container, article):
+    if not container:
+        return []
+
+    lines = []
+    for text in container.get_text('\n').splitlines():
+        text = normalize(text)
+        if text and text not in NOISE:
+            lines.append(text)
+
+    block = extract_article(lines, article)
+    return block or lines
+
+def extract_lid_from_plain_lines(lines, wanted_lid, wanted_onderdelen):
+    if not lines:
+        return ''
+    return extract_lid_and_onderdelen(lines, wanted_lid, wanted_onderdelen)
+
+def extract_lid_from_tag_structure(article_container, wanted_lid, wanted_onderdelen):
+    if not article_container or not wanted_lid:
+        return ''
+
+    candidates = []
+    for tag in article_container.find_all(['li', 'p', 'div'], recursive=True):
+        text = normalize(tag.get_text(' ', strip=True))
+        if not text:
+            continue
+        if line_starts_lid(text, wanted_lid):
+            candidates.append(tag)
+
+    for lid_node in candidates:
+        text_lines = [normalize(x) for x in lid_node.get_text('\n').splitlines() if normalize(x)]
+        if not text_lines:
+            continue
+        result = extract_onderdelen_from_lid_lines(text_lines, wanted_onderdelen)
+        if result:
+            return result
+
+    return ''
+
 def extract_structured_article_text(soup, article, source_text):
     wanted_lid_match = LID_RE.search(source_text or '')
     wanted_lid = wanted_lid_match.group(1) if wanted_lid_match else None
     wanted_onderdelen = extract_requested_onderdelen(source_text)
 
-    article_header = None
-    for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'div', 'span', 'p']):
-        text = normalize(tag.get_text(' ', strip=True))
-        parsed = parse_article(text)
-        if parsed and article_matches(parsed[0], article):
-            article_header = tag
-            break
-
+    article_header = find_article_header_in_soup(soup, article)
     if not article_header:
         return ''
 
-    holder = article_header.parent
-    while holder and holder.name not in ['section', 'article', 'div', 'main', 'body']:
-        holder = holder.parent
-    if not holder:
-        holder = article_header.parent or soup
+    article_container = nearest_article_container(article_header)
 
     if wanted_lid:
-        lid_node = None
-        for tag in holder.find_all(['li', 'p', 'div'], recursive=True):
-            text = normalize(tag.get_text(' ', strip=True))
-            if line_starts_lid(text, wanted_lid):
-                lid_node = tag
-                break
+        direct_lid = extract_lid_from_tag_structure(article_container, wanted_lid, wanted_onderdelen)
+        if direct_lid:
+            return direct_lid
 
-        if lid_node:
-            if wanted_onderdelen:
-                collected = [str(wanted_lid)]
-                for child in lid_node.find_all(['li', 'p', 'div'], recursive=True):
-                    text = normalize(child.get_text(' ', strip=True))
-                    letter = line_starts_letter(text)
-                    if letter and letter in wanted_onderdelen:
-                        collected.append(text)
-                if len(collected) > 1:
-                    return '\n'.join(collected)
-
-            text = normalize(lid_node.get_text('\n', strip=True))
-            if text:
-                return text
+    plain_lines = extract_text_from_container_until_next_article(article_container, article)
+    if plain_lines:
+        result = extract_lid_from_plain_lines(plain_lines, wanted_lid, wanted_onderdelen)
+        if result:
+            return result
 
     return ''
 
@@ -254,7 +302,12 @@ def load_cards():
 
         left, right = line.split('→', 1)
         source_text = normalize(left.replace('*', ''))
-        description = source_text
+        description = source_text.split('→')[0].strip()
+
+        if '->' in description:
+            description = description.split('->', 1)[0].strip()
+        if '++' in description:
+            description = description.replace('++', '').strip()
 
         link = re.search(r'\[(.*?)\]\((https?://[^)]+)\)', right)
         art = ARTICLE_RE.search(source_text)
