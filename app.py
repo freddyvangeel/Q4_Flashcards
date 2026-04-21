@@ -157,10 +157,13 @@ def main():
         st.session_state.card = random.choice(cards)
     if 'back' not in st.session_state:
         st.session_state.back = ''
+    if 'answer_open' not in st.session_state:
+        st.session_state.answer_open = False
 
     if st.button('Nieuwe kaart'):
         st.session_state.card = random.choice(cards)
         st.session_state.back = ''
+        st.session_state.answer_open = False
         st.rerun()
 
     c = st.session_state.card
@@ -172,7 +175,7 @@ def main():
     if not st.session_state.back:
         st.session_state.back = extract(c['url'], c['article'], c['source_text'])
 
-    with st.expander('Antwoord', expanded=False):
+    with st.expander('Antwoord', expanded=st.session_state.answer_open):
         st.text_area('Wettekst', st.session_state.back, height=300)
 
 if __name__ == '__main__':
