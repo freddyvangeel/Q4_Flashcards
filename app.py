@@ -15,7 +15,7 @@ USER_AGENT = 'Mozilla/5.0'
 REQUEST_TIMEOUT = 20
 
 ARTICLE_RE = re.compile(r'\bArtikel\s*:\s*([^\n]+)', re.I)
-LID_RE = re.compile(r'\bLid\s*:\s*([^\n]+)', re.I)
+LID_RE = re.compile(r'\bLid\s*:?\s*(\d+)', re.I)
 
 NOISE = [
     'Toon relaties in LiDO','Maak een permanente link',
@@ -74,16 +74,42 @@ def extract_article(lines, wanted):
 
         block.append(line)
 
-    return '\n'.join(block) if len(block) > 2 else None
+    return block if len(block) > 2 else None
 
 
-def extract(url, article):
+def extract_lid(block_lines, wanted_lid):
+    if not block_lines or not wanted_lid:
+        return '\n'.join(block_lines or [])
+
+    lid_lines = []
+    capture = False
+
+    for line in block_lines:
+        if re.match(rf'^{wanted_lid}\b', line):
+            capture = True
+            lid_lines.append(line)
+            continue
+
+        if capture and re.match(r'^\d+\b', line):
+            break
+
+        if capture:
+            lid_lines.append(line)
+
+    return '\n'.join(lid_lines) if lid_lines else '\n'.join(block_lines)
+
+
+def extract(url, article, front_text):
     try:
         r = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
         lines = page_lines(r.text)
-        txt = extract_article(lines, article)
-        if txt:
-            return txt
+        block = extract_article(lines, article)
+
+        if block:
+            lid_match = LID_RE.search(front_text or '')
+            lid = lid_match.group(1) if lid_match else None
+            return extract_lid(block, lid)
+
     except:
         pass
     return 'Artikel tekst niet gevonden op pagina.'
@@ -122,7 +148,7 @@ def main():
         st.session_state.back = ''
 
     if not st.session_state.back:
-        st.session_state.back = extract(c['url'], c['article'])
+        st.session_state.back = extract(c['url'], c['article'], c['front'])
 
     st.text_area('Wettekst', st.session_state.back, height=300)
 
