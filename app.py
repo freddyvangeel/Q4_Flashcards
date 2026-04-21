@@ -40,17 +40,33 @@ def article_matches(a, b):
     return normalize_article_id(a) == normalize_article_id(b)
 
 
+def article_number_from_line(line):
+    line = normalize(line)
+    match = re.match(r'^Artikel\s+([\d]+[\d:.a-zA-Z]*)\b', line, re.I)
+    if match:
+        return match.group(1)
+    return None
+
+
+def article_tail_after_number(line):
+    line = normalize(line)
+    match = re.match(r'^Artikel\s+[\d]+[\d:.a-zA-Z]*\b\s*(.*)$', line, re.I)
+    if match:
+        return normalize(match.group(1))
+    return ''
+
+
 def parse_article(line):
     line = normalize(line)
-    match = re.match(r'^Artikel\s+([\d:.a-zA-Z]+)\b', line)
-    if not match:
+    article_no = article_number_from_line(line)
+    if not article_no:
         return None
-    return match.group(1), normalize(line[match.end():])
+    return article_no, article_tail_after_number(line)
 
 
 def is_new_article_heading(line):
     line = normalize(line)
-    return bool(re.match(r'^Artikel\s+[\d:.a-zA-Z]+\b', line))
+    return bool(re.match(r'^Artikel\s+[\d]+[\d:.a-zA-Z]*\b', line, re.I))
 
 
 def page_lines(text):
@@ -92,8 +108,14 @@ def extract_article(lines, wanted):
         return block
 
     for idx, line in enumerate(lines):
-        if re.match(rf'^Artikel\s+{re.escape(wanted)}\b', line):
-            return [f'Artikel {wanted}'] + lines[idx + 1:idx + 10]
+        parsed = parse_article(line)
+        if parsed and article_matches(parsed[0], wanted):
+            tail = parsed[1]
+            fallback = [f'Artikel {wanted}']
+            if tail:
+                fallback.append(tail)
+            fallback.extend(lines[idx + 1:idx + 10])
+            return fallback
 
     return None
 
