@@ -15,6 +15,8 @@ REQUEST_TIMEOUT = 20
 ARTICLE_RE = re.compile(r'\bArtikel\s*:?\s*([^\n]+?)(?=(?:\s+Lid\s*:?\s*|\s*→|$))', re.I)
 LID_RE = re.compile(r'\bLid\s*:?\s*([\dA-Za-z]+)', re.I)
 ONDER_RE = re.compile(r'\bonder\s+([A-Za-z0-9,\s]+)', re.I)
+JCI_ARTICLE_RE = re.compile(r'(?:[?&]artikel=|(?:^|[&])artikel=)([^&]+)', re.I)
+JCI_PARAGRAAF_RE = re.compile(r'(?:[?&]paragraaf=|(?:^|[&])paragraaf=)([^&]+)', re.I)
 
 NOISE = [
     'Toon relaties in LiDO',
@@ -241,6 +243,18 @@ def extract_lid_and_onderdelen(block_lines, wanted_lid, wanted_onderdelen):
         return '\n'.join(lid_lines)
 
     return '\n'.join(block_lines)
+
+
+def parse_url_targets(url):
+    article = None
+    paragraaf = None
+    article_match = JCI_ARTICLE_RE.search(url or '')
+    if article_match:
+        article = normalize(article_match.group(1))
+    paragraaf_match = JCI_PARAGRAAF_RE.search(url or '')
+    if paragraaf_match:
+        paragraaf = normalize(paragraaf_match.group(1))
+    return article, paragraaf
 
 
 def find_article_header_in_soup(soup, article):
@@ -603,17 +617,20 @@ def extract_structured_article_text(soup, article, source_text):
 
 def extract(url, article, source_text):
     try:
+        url_article, url_paragraaf = parse_url_targets(url)
+        effective_article = url_article or article
+
         response = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        structured = extract_structured_article_text(soup, article, source_text)
+        structured = extract_structured_article_text(soup, effective_article, source_text)
         if structured:
             return structured
 
         lines = page_lines(response.text)
-        exact_block = extract_article_from_segments(lines, article, source_text) or extract_article_block_from_page_lines(lines, article)
+        exact_block = extract_article_from_segments(lines, effective_article, source_text) or extract_article_block_from_page_lines(lines, effective_article)
         if not exact_block:
-            exact_block = extract_article_by_number_fallback(lines, article, source_text)
+            exact_block = extract_article_by_number_fallback(lines, effective_article, source_text)
         if exact_block:
             lid_match = LID_RE.search(source_text or '')
             lid = lid_match.group(1) if lid_match else None
@@ -627,7 +644,35 @@ def extract(url, article, source_text):
                     return flattened
             return result
 
-        block = extract_article(lines, article)
+        if url_paragraaf:
+            paragraaf_lines = []
+            collecting = False
+            paragraaf_norm = normalize_article_id(url_paragraaf)
+            for line in lines:
+                if normalize_article_id(line).startswith(paragraaf_norm):
+                    collecting = True
+                    paragraaf_lines.append(line)
+                    continue
+                if collecting and (is_section_heading(line) or is_new_article_heading(line)):
+                    break
+                if collecting:
+                    paragraaf_lines.append(line)
+            if paragraaf_lines:
+                exact_block = extract_article_from_segments(paragraaf_lines, effective_article, source_text) or extract_article_block_from_page_lines(paragraaf_lines, effective_article)
+                if exact_block:
+                    lid_match = LID_RE.search(source_text or '')
+                    lid = lid_match.group(1) if lid_match else None
+                    onderdelen = extract_requested_onderdelen(source_text)
+                    result = extract_lid_and_onderdelen(exact_block, lid, onderdelen)
+                    if result and (not lid or result != '\n'.join(exact_block)):
+                        return result
+                    if lid:
+                        flattened = extract_lid_via_flattened_block(exact_block, lid, onderdelen)
+                        if flattened:
+                            return flattened
+                    return result
+
+        block = extract_article(lines, effective_article)
         if block:
             lid_match = LID_RE.search(source_text or '')
             lid = lid_match.group(1) if lid_match else None
