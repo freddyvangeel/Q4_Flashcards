@@ -31,7 +31,6 @@ def article_matches(a, b):
     b = normalize(b).lower().replace('.', ':')
     return a == b
 
-# FIX 1: alleen echte artikelkoppen (begin regel)
 def parse_article(line):
     line = normalize(line)
     m = re.match(r'^Artikel\s+([\d:.a-zA-Z]+)\b', line)
@@ -39,7 +38,6 @@ def parse_article(line):
         return None
     return m.group(1), normalize(line[m.end():])
 
-# FIX 2: alleen echte headings, geen inline verwijzingen
 def is_new_article_heading(line):
     line = normalize(line)
     return bool(re.match(r'^Artikel\s+[\d:.a-zA-Z]+\b', line))
@@ -71,7 +69,6 @@ def extract_article(lines, wanted):
         if not started:
             continue
 
-        # stop alleen bij echte nieuwe kop
         if is_new_article_heading(line):
             next_parsed = parse_article(line)
             if next_parsed and not article_matches(next_parsed[0], wanted):
@@ -82,7 +79,6 @@ def extract_article(lines, wanted):
     if block:
         return block
 
-    # FIX 3: strengere fallback (alleen echte kop)
     for i, line in enumerate(lines):
         if re.match(rf'^Artikel\s+{re.escape(wanted)}\b', line):
             return [f'Artikel {wanted}'] + lines[i+1:i+10]
@@ -121,7 +117,7 @@ def extract(url, article, source_text):
             lid = lid_match.group(1) if lid_match else None
             return extract_lid(block, lid)
 
-    except:
+    except Exception:
         pass
 
     return 'Artikel tekst niet gevonden op pagina.'
@@ -151,17 +147,25 @@ def main():
     st.set_page_config(page_title='Q4 Flashcards', layout='wide')
 
     cards = load_cards()
-    c = random.choice(cards)
+    if not cards:
+        st.error('Geen kaarten gevonden.')
+        return
+
+    if 'card' not in st.session_state:
+        st.session_state.card = random.choice(cards)
+    if 'back' not in st.session_state:
+        st.session_state.back = ''
 
     if st.button('Nieuwe kaart'):
+        st.session_state.card = random.choice(cards)
+        st.session_state.back = ''
         st.rerun()
+
+    c = st.session_state.card
 
     st.subheader(f"Artikel {c['article']}")
     st.info(c['front'])
     st.markdown(f"[Open wet]({c['url']})")
-
-    if 'back' not in st.session_state:
-        st.session_state.back = ''
 
     if not st.session_state.back:
         st.session_state.back = extract(c['url'], c['article'], c['source_text'])
