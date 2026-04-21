@@ -163,7 +163,7 @@ def main():
 
     c = st.session_state.card
 
-    st.subheader(f"Artikel {c['article']}")
+    st.subheader(c['front'])
     st.info(c['front'])
     st.markdown(f"[Open wet]({c['url']})")
 
