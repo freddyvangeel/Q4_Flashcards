@@ -110,12 +110,14 @@ def extract_article(lines, wanted):
     for idx, line in enumerate(lines):
         parsed = parse_article(line)
         if parsed and article_matches(parsed[0], wanted):
-            tail = parsed[1]
-            fallback = [f'Artikel {wanted}']
-            if tail:
-                fallback.append(tail)
-            fallback.extend(lines[idx + 1:idx + 10])
-            return fallback
+            fallback = []
+            for follow in lines[idx:]:
+                if fallback and is_new_article_heading(follow):
+                    next_parsed = parse_article(follow)
+                    if next_parsed and not article_matches(next_parsed[0], wanted):
+                        break
+                fallback.append(follow)
+            return fallback or None
 
     return None
 
@@ -380,6 +382,97 @@ def extract_article_via_anchor_links(soup, article, source_text):
     return ''
 
 
+def split_into_article_segments(lines):
+    segments = []
+    current = []
+
+    for line in lines:
+        if is_new_article_heading(line):
+            if current:
+                segments.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+
+    if current:
+        segments.append(current)
+
+    return segments
+
+
+def segment_matches_article(segment, article):
+    if not segment:
+        return False
+    parsed = parse_article(segment[0])
+    return bool(parsed and article_matches(parsed[0], article))
+
+
+def extract_article_from_segments(lines, article):
+    for segment in split_into_article_segments(lines):
+        if segment_matches_article(segment, article):
+            return segment
+    return None
+
+
+def extract_article_by_number_fallback(lines, article):
+    normalized_target = normalize_article_id(article)
+    article_digits = normalized_target.split('.')[-1]
+
+    for segment in split_into_article_segments(lines):
+        parsed = parse_article(segment[0])
+        if not parsed:
+            continue
+        current_normalized = normalize_article_id(parsed[0])
+        current_digits = current_normalized.split('.')[-1]
+        if current_digits == article_digits:
+            return segment
+    return None
+
+
+def extract_article_by_id_attributes(soup, article, source_text):
+    wanted_lid_match = LID_RE.search(source_text or '')
+    wanted_lid = wanted_lid_match.group(1) if wanted_lid_match else None
+    wanted_onderdelen = extract_requested_onderdelen(source_text)
+    normalized_target = normalize_article_id(article)
+    article_digits = normalized_target.split('.')[-1]
+
+    candidates = []
+    for tag in soup.find_all(True):
+        attrs = ' '.join([
+            str(tag.get('id', '')),
+            ' '.join(tag.get('class', [])) if isinstance(tag.get('class'), list) else str(tag.get('class', '')),
+            str(tag.get('data-nummer', '')),
+            str(tag.get('data-id', '')),
+            str(tag.get('name', '')),
+        ])
+        attrs_norm = normalize_article_id(attrs)
+        if normalized_target and normalized_target in attrs_norm:
+            candidates.append(tag)
+        elif article_digits and re.search(rf'(^|[^0-9]){re.escape(article_digits)}([^0-9]|$)', attrs_norm):
+            candidates.append(tag)
+
+    for tag in candidates:
+        container = nearest_article_container(tag)
+        lines = extract_text_from_container_until_next_article(container, article)
+        exact_block = extract_article_from_segments(lines, article) or extract_article_block_from_page_lines(lines, article)
+        if not exact_block:
+            exact_block = extract_article_by_number_fallback(lines, article)
+        if not exact_block:
+            continue
+
+        if wanted_lid:
+            result = extract_lid_and_onderdelen(exact_block, wanted_lid, wanted_onderdelen)
+            if result and result != '\n'.join(exact_block):
+                return result
+            result = extract_lid_via_flattened_block(exact_block, wanted_lid, wanted_onderdelen)
+            if result:
+                return result
+        else:
+            return '\n'.join(exact_block)
+
+    return ''
+
+
 def extract_structured_article_text(soup, article, source_text):
     wanted_lid_match = LID_RE.search(source_text or '')
     wanted_lid = wanted_lid_match.group(1) if wanted_lid_match else None
@@ -387,6 +480,9 @@ def extract_structured_article_text(soup, article, source_text):
 
     article_header = find_article_header_in_soup(soup, article)
     if not article_header:
+        attr_result = extract_article_by_id_attributes(soup, article, source_text)
+        if attr_result:
+            return attr_result
         anchor_result = extract_article_via_anchor_links(soup, article, source_text)
         if anchor_result:
             return anchor_result
@@ -401,7 +497,7 @@ def extract_structured_article_text(soup, article, source_text):
 
     plain_lines = extract_text_from_container_until_next_article(article_container, article)
     if plain_lines:
-        exact_block = extract_article_block_from_page_lines(plain_lines, article) or plain_lines
+        exact_block = extract_article_from_segments(plain_lines, article) or extract_article_block_from_page_lines(plain_lines, article) or plain_lines
         result = extract_lid_from_plain_lines(exact_block, wanted_lid, wanted_onderdelen)
         if result and (not wanted_lid or result != '\n'.join(exact_block)):
             return result
@@ -410,6 +506,12 @@ def extract_structured_article_text(soup, article, source_text):
             result = extract_lid_via_flattened_block(exact_block, wanted_lid, wanted_onderdelen)
             if result:
                 return result
+        elif exact_block:
+            return '\n'.join(exact_block)
+
+    attr_result = extract_article_by_id_attributes(soup, article, source_text)
+    if attr_result:
+        return attr_result
 
     anchor_result = extract_article_via_anchor_links(soup, article, source_text)
     if anchor_result:
@@ -428,7 +530,9 @@ def extract(url, article, source_text):
             return structured
 
         lines = page_lines(response.text)
-        exact_block = extract_article_block_from_page_lines(lines, article)
+        exact_block = extract_article_from_segments(lines, article) or extract_article_block_from_page_lines(lines, article)
+        if not exact_block:
+            exact_block = extract_article_by_number_fallback(lines, article)
         if exact_block:
             lid_match = LID_RE.search(source_text or '')
             lid = lid_match.group(1) if lid_match else None
