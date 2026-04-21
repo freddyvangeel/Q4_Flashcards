@@ -99,6 +99,54 @@ def extract_requested_onderdelen(source_text):
             found.append(part.lower())
     return found
 
+def line_starts_lid(line, wanted_lid):
+    line = normalize(line)
+    return bool(re.match(rf'^{re.escape(str(wanted_lid))}[.:)]?\b', line))
+
+def line_starts_new_lid(line):
+    line = normalize(line)
+    return bool(re.match(r'^\d+[.:)]?\b', line))
+
+def line_starts_letter(line):
+    line = normalize(line)
+    m = re.match(r'^([a-z])[.:)]?\b', line, re.I)
+    return m.group(1).lower() if m else None
+
+def line_starts_subnumber(line):
+    line = normalize(line)
+    return bool(re.match(r'^\d+[°o]?[.:)]?\b', line))
+
+def extract_onderdelen_from_lid_lines(lid_lines, wanted_onderdelen):
+    if not wanted_onderdelen:
+        return '\n'.join(lid_lines)
+
+    wanted_onderdelen = [o.lower() for o in wanted_onderdelen]
+    result = []
+    current_letter = None
+    current_chunk = []
+    collected_any = False
+
+    def flush_chunk():
+        nonlocal current_letter, current_chunk, collected_any, result
+        if current_letter and current_chunk and current_letter.lower() in wanted_onderdelen:
+            result.extend(current_chunk)
+            collected_any = True
+        current_chunk = []
+
+    for line in lid_lines[1:]:
+        letter = line_starts_letter(line)
+        if letter:
+            flush_chunk()
+            current_letter = letter
+            current_chunk = [line]
+        elif current_letter:
+            current_chunk.append(line)
+        elif not collected_any:
+            result.append(line)
+
+    flush_chunk()
+    return '\n'.join(result) if result else '\n'.join(lid_lines)
+
 def extract_lid_and_onderdelen(block_lines, wanted_lid, wanted_onderdelen):
     if not block_lines:
         return ''
@@ -110,58 +158,80 @@ def extract_lid_and_onderdelen(block_lines, wanted_lid, wanted_onderdelen):
     capture_lid = False
 
     for line in block_lines:
-        if re.match(rf'^{wanted_lid}[.:)]?\b', line):
+        if line_starts_lid(line, wanted_lid):
             capture_lid = True
             lid_lines.append(line)
             continue
 
-        if capture_lid and re.match(r'^\d+[.:)]?\b', line):
+        if capture_lid and line_starts_new_lid(line):
             break
 
         if capture_lid:
             lid_lines.append(line)
 
-    if not lid_lines:
-        return '\n'.join(block_lines)
-
-    if not wanted_onderdelen:
+    if lid_lines:
+        if wanted_onderdelen:
+            return extract_onderdelen_from_lid_lines(lid_lines, wanted_onderdelen)
         return '\n'.join(lid_lines)
 
-    result = []
-    current_letter = None
-    current_chunk = []
-    collected_any = False
+    return '\n'.join(block_lines)
 
-    def flush_chunk():
-        nonlocal current_letter, current_chunk, collected_any, result
-        if current_letter and current_chunk and current_letter.lower() in wanted_onderdelen:
-            if not collected_any:
-                result.append(str(wanted_lid))
-                collected_any = True
-            result.extend(current_chunk)
-        current_chunk = []
+def extract_structured_article_text(soup, article, source_text):
+    wanted_lid_match = LID_RE.search(source_text or '')
+    wanted_lid = wanted_lid_match.group(1) if wanted_lid_match else None
+    wanted_onderdelen = extract_requested_onderdelen(source_text)
 
-    for line in lid_lines[1:]:
-        m = re.match(r'^([a-z])[.:)]?\b', line, re.I)
-        if m:
-            flush_chunk()
-            current_letter = m.group(1).lower()
-            current_chunk = [line]
-        elif current_letter:
-            current_chunk.append(line)
-        else:
-            if not collected_any:
-                result.append(str(wanted_lid))
-                collected_any = True
-            result.append(line)
+    article_header = None
+    for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'div', 'span', 'p']):
+        text = normalize(tag.get_text(' ', strip=True))
+        parsed = parse_article(text)
+        if parsed and article_matches(parsed[0], article):
+            article_header = tag
+            break
 
-    flush_chunk()
+    if not article_header:
+        return ''
 
-    return '\n'.join(result) if result else '\n'.join(lid_lines)
+    holder = article_header.parent
+    while holder and holder.name not in ['section', 'article', 'div', 'main', 'body']:
+        holder = holder.parent
+    if not holder:
+        holder = article_header.parent or soup
+
+    if wanted_lid:
+        lid_node = None
+        for tag in holder.find_all(['li', 'p', 'div'], recursive=True):
+            text = normalize(tag.get_text(' ', strip=True))
+            if line_starts_lid(text, wanted_lid):
+                lid_node = tag
+                break
+
+        if lid_node:
+            if wanted_onderdelen:
+                collected = [str(wanted_lid)]
+                for child in lid_node.find_all(['li', 'p', 'div'], recursive=True):
+                    text = normalize(child.get_text(' ', strip=True))
+                    letter = line_starts_letter(text)
+                    if letter and letter in wanted_onderdelen:
+                        collected.append(text)
+                if len(collected) > 1:
+                    return '\n'.join(collected)
+
+            text = normalize(lid_node.get_text('\n', strip=True))
+            if text:
+                return text
+
+    return ''
 
 def extract(url, article, source_text):
     try:
         r = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=REQUEST_TIMEOUT)
+        soup = BeautifulSoup(r.text, 'html.parser')
+
+        structured = extract_structured_article_text(soup, article, source_text)
+        if structured:
+            return structured
+
         lines = page_lines(r.text)
         block = extract_article(lines, article)
 
